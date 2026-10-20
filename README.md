@@ -14,6 +14,34 @@
   包与版本维度的趋势图、导入日志
 - **自动导入**：`auto_import.py` 把 `crawled_data/*.csv` 增量入库并在 `imported_file` 表登记
 
+## 界面预览
+
+崩溃记录列表：概览卡片、按崩溃次数排序的聚合栈、包/版本/状态筛选与分页。
+
+![崩溃记录列表](docs/screenshots/01-crash-list.png)
+
+崩溃详情：原始堆栈 + 符号化堆栈、崩溃次数/MD5/二进制等元信息、再往下是解决状态与修复链接填写。
+
+![崩溃详情](docs/screenshots/02-crash-detail.png)
+
+崩溃趋势：按天统计的 30 天走势，可切换版本过滤。
+
+![崩溃趋势](docs/screenshots/03-trend.png)
+
+堆栈对比：勾选两条记录后进入，左右并排比对并给出相似度，判定同一处崩溃可直接合并。
+
+![堆栈对比](docs/screenshots/04-compare.png)
+
+版本统计：按版本看崩溃量与解决进度。
+
+![版本统计](docs/screenshots/05-version-stats.png)
+
+导入记录：每个 CSV 的行数、入库行数与导入时间，用于核对数据完整性。
+
+![导入记录](docs/screenshots/06-import-logs.png)
+
+> 截图取自真实运行实例，客户定制版本号后缀（如 `+xxx`、`_xxx`）在截图时已抹除。
+
 ## 目录结构
 
 ```
