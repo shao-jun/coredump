@@ -66,11 +66,12 @@ pip3 install -r requirements.txt
 
 ## 配置
 
-所有连接信息通过环境变量提供，仓库内不保存任何凭据。先准备环境变量：
+所有连接信息通过环境变量提供，仓库内不保存任何凭据。把配置写到项目根目录的 `.env` 即可，
+`db_init.py` 在导入时会自动读取（已 `export` 的变量优先，不会被覆盖），cron 里的
+`python3 auto_import.py`、手动跑的 `python3 crawl_data.py` 都能直接生效，无需先 `source`：
 
 ```bash
 cp .env.example .env      # 按实际情况填写，.env 已被 .gitignore 忽略
-set -a && . ./.env && set +a
 ```
 
 | 变量 | 说明 | 默认值 |

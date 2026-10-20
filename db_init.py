@@ -3,6 +3,29 @@ import os
 import pymysql
 
 
+def load_env(path=None):
+    """读取脚本目录下的 .env（存在时），补齐未设置的环境变量。
+
+    不覆盖已在环境中存在的变量，因此 export 的优先级更高。
+    """
+    env_path = path or os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
+    if not os.path.exists(env_path):
+        return
+    with open(env_path, encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#') or '=' not in line:
+                continue
+            key, value = line.split('=', 1)
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+
+load_env()
+
+
 def get_connection():
     return pymysql.connect(
         host=os.environ.get('DB_HOST', 'localhost'),
