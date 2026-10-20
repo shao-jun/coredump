@@ -1,0 +1,22 @@
+/__pycache__/
+*.py[cod]
+
+# 环境变量与本地配置（含凭据，禁止提交）
+.env
+.env.*
+!.env.example
+
+# 抓取到的原始数据与数据库文件
+crawled_data/*.csv
+*.db
+*.sqlite
+*.sqlite3
+
+# 浏览器调试产物（可能包含内网页面截图/日志）
+.playwright-mcp/
+.playwright/
+
+# 编辑器/系统
+.idea/
+.vscode/
+.DS_Store

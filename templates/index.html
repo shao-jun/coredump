@@ -1,0 +1,725 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Coredump 崩溃分析平台</title>
+  <script src="/static/js/chart.umd.min.js"></script>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; background:#f5f7fa; color:#1f2937; min-height:100vh; }
+
+.header { background:#fff; border-bottom:1px solid #e5e7eb; padding:16px 32px; display:flex; align-items:center; gap:12px; box-shadow:0 1px 3px rgba(0,0,0,.06); }
+.header h1 { font-size:20px; font-weight:600; color:#111827; }
+.header .badge { background:#ecfdf5; color:#059669; font-size:12px; padding:2px 10px; border-radius:12px; border:1px solid #a7f3d0; }
+
+.container { max-width:1440px; margin:0 auto; padding:24px 32px; }
+
+.stats { display:grid; grid-template-columns:repeat(5, 1fr); gap:16px; margin-bottom:24px; }
+.stat-card { background:#fff; border:1px solid #e5e7eb; border-radius:8px; padding:20px 24px; box-shadow:0 1px 2px rgba(0,0,0,.04); }
+.stat-card .label { font-size:13px; color:#6b7280; margin-bottom:8px; }
+.stat-card .value { font-size:32px; font-weight:700; color:#111827; }
+.stat-card .value.green { color:#059669; }
+.stat-card .value.red { color:#dc2626; }
+.stat-card .value.yellow { color:#d97706; }
+
+.tabs { display:flex; gap:0; border-bottom:2px solid #e5e7eb; margin-bottom:20px; }
+.tab-btn { padding:10px 24px; font-size:14px; font-weight:500; color:#6b7280; background:none; border:none; border-bottom:2px solid transparent; margin-bottom:-2px; cursor:pointer; transition:all .2s; }
+.tab-btn:hover { color:#111827; }
+.tab-btn.active { color:#059669; border-bottom-color:#059669; font-weight:600; }
+
+.tab-panel { display:none; }
+.tab-panel.active { display:block; }
+
+.toolbar { display:flex; gap:12px; align-items:center; margin-bottom:20px; flex-wrap:wrap; }
+.toolbar input[type="text"] { background:#fff; border:1px solid #d1d5db; color:#1f2937; padding:8px 14px; border-radius:6px; font-size:14px; flex:1; min-width:200px; outline:none; transition:border-color .2s; }
+.toolbar input[type="text"]:focus { border-color:#059669; }
+.toolbar select { background:#fff; border:1px solid #d1d5db; color:#1f2937; padding:8px 14px; border-radius:6px; font-size:14px; outline:none; min-width:150px; }
+.toolbar select:focus { border-color:#059669; }
+.btn { padding:8px 18px; border-radius:6px; font-size:14px; cursor:pointer; border:1px solid #d1d5db; background:#fff; color:#1f2937; transition:all .2s; white-space:nowrap; }
+.btn:hover { border-color:#059669; color:#059669; }
+.btn.primary { background:#059669; color:#fff; border-color:#059669; font-weight:600; }
+.btn.primary:hover { background:#047857; }
+.btn.sm { padding:4px 12px; font-size:12px; }
+.btn.resolve { border-color:#059669; color:#059669; }
+.btn.unresolve { border-color:#dc2626; color:#dc2626; }
+
+.version-table { background:#fff; border:1px solid #e5e7eb; border-radius:8px; overflow:hidden; margin-bottom:24px; box-shadow:0 1px 2px rgba(0,0,0,.04); }
+.version-table table { width:100%; border-collapse:collapse; }
+.version-bar-wrap { display:flex; align-items:center; gap:8px; }
+.version-bar { height:8px; border-radius:4px; background:#fecaca; flex:1; max-width:200px; overflow:hidden; }
+.version-bar .fill { height:100%; background:#059669; border-radius:4px; transition:width .3s; }
+
+.table-wrap { background:#fff; border:1px solid #e5e7eb; border-radius:8px; overflow-x:auto; box-shadow:0 1px 2px rgba(0,0,0,.04); }
+table { width:100%; border-collapse:collapse; }
+thead th { background:#f9fafb; padding:12px 16px; text-align:left; font-size:12px; color:#6b7280; font-weight:600; text-transform:uppercase; letter-spacing:.5px; border-bottom:1px solid #e5e7eb; position:sticky; top:0; z-index:1; }
+tbody tr { border-bottom:1px solid #f3f4f6; transition:background .15s; }
+tbody tr:hover { background:#f9fafb; }
+tbody tr.clickable { cursor:pointer; }
+tbody td { padding:10px 16px; font-size:13px; color:#374151; max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.mono { font-family:"JetBrains Mono","Fira Code",monospace; font-size:12px; color:#6b7280; }
+.status-tag { display:inline-block; padding:2px 10px; border-radius:12px; font-size:12px; font-weight:600; }
+.status-tag.unresolved { background:#fef2f2; color:#dc2626; border:1px solid #fecaca; }
+.status-tag.wontfix { background:#fffbeb; color:#d97706; border:1px solid #fde68a; }
+.status-tag.resolved { background:#ecfdf5; color:#059669; border:1px solid #a7f3d0; }
+.status-tag.full { background:#ecfdf5; color:#059669; border:1px solid #a7f3d0; }
+.status-tag.zero { background:#fef2f2; color:#dc2626; border:1px solid #fecaca; }
+
+.pagination { display:flex; justify-content:center; align-items:center; gap:6px; padding:20px 0; }
+.pagination button { min-width:36px; height:36px; border:1px solid #d1d5db; background:#fff; color:#374151; border-radius:6px; cursor:pointer; font-size:13px; transition:all .15s; }
+.pagination button:hover:not(:disabled) { border-color:#059669; color:#059669; }
+.pagination button.active { background:#059669; color:#fff; border-color:#059669; font-weight:700; }
+.pagination button:disabled { opacity:.4; cursor:default; }
+.page-info { color:#6b7280; font-size:13px; margin:0 12px; }
+
+.modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.3); z-index:100; justify-content:center; align-items:center; }
+.modal-overlay.active { display:flex; }
+.modal { background:#fff; border:1px solid #e5e7eb; border-radius:12px; width:90%; max-width:860px; max-height:85vh; overflow-y:auto; padding:28px 32px; position:relative; box-shadow:0 20px 60px rgba(0,0,0,.15); }
+.modal h2 { font-size:18px; color:#111827; margin-bottom:20px; padding-right:40px; }
+.modal .close { position:absolute; top:16px; right:20px; background:none; border:none; color:#9ca3af; font-size:22px; cursor:pointer; line-height:1; }
+.modal .close:hover { color:#374151; }
+.detail-grid { display:grid; grid-template-columns:repeat(3, 1fr); gap:6px 12px; margin-bottom:16px; }
+.detail-item { background:#f9fafb; border:1px solid #e5e7eb; border-radius:4px; padding:6px 12px; }
+.detail-item .dl { font-size:11px; color:#9ca3af; margin-bottom:2px; }
+.detail-item .dv { font-size:13px; color:#1f2937; word-break:break-all; }
+.detail-item .dv a { color:#2563eb; text-decoration:none; }
+.detail-item .dv a:hover { text-decoration:underline; }
+.stack-section { margin-top:16px; }
+.stack-section h3 { font-size:14px; color:#6b7280; margin-bottom:10px; }
+.stack-pre { background:#1e293b; border:1px solid #334155; border-radius:6px; padding:16px; max-height:50vh; overflow:auto; font-family:"JetBrains Mono","Fira Code",monospace; font-size:12px; line-height:1.6; color:#e2e8f0; white-space:pre-wrap; word-break:break-all; }
+.resolve-section { margin-top:20px; padding-top:20px; border-top:1px solid #e5e7eb; }
+.resolve-section h3 { font-size:14px; color:#6b7280; margin-bottom:12px; }
+.resolve-form { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+.resolve-form input[type="text"] { flex:1; min-width:200px; background:#fff; border:1px solid #d1d5db; color:#1f2937; padding:8px 14px; border-radius:6px; font-size:14px; outline:none; }
+.resolve-form input[type="text"]:focus { border-color:#059669; }
+.resolve-form input[type="text"].err-border { border-color:#dc2626; }
+
+
+.diff-unique { background:rgba(239,68,68,0.15); display:inline; padding:0 6px; margin-left:2px; border-left:2px solid #ef4444; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Coredump 崩溃分析平台</h1>
+  <span class="badge">LOCAL</span>
+</div>
+
+<div class="container">
+  <div class="stats">
+    <div class="stat-card"><div class="label">崩溃总数</div><div class="value green" id="stat-total">{{ total }}</div></div>
+    <div class="stat-card"><div class="label">未解决崩溃类型</div><div class="value red" id="stat-unresolved">{{ unresolved }}</div></div>
+    <div class="stat-card"><div class="label">已解决崩溃类型</div><div class="value green" id="stat-resolved">{{ resolved }}</div></div>
+    <div class="stat-card"><div class="label">解不动崩溃类型</div><div class="value yellow" id="stat-wontfix">{{ wontfix }}</div></div>
+    <div class="stat-card"><div class="label">Top 崩溃包</div><div class="value" style="font-size:16px;color:#374151;">{% if top_packages %}{{ top_packages[0][0] }} {{ top_packages[0][1] }}{% else %}-{% endif %}</div></div>
+  </div>
+
+  <div class="tabs">
+    <button class="tab-btn active" onclick="switchTab(0)">崩溃记录</button>
+    <button class="tab-btn" onclick="switchTab(1)">版本统计</button>
+    <button class="tab-btn" onclick="switchTab(2)">导入记录</button>
+  </div>
+
+  <div class="tab-panel active" id="tab-crashes">
+    <div class="toolbar">
+      <input type="text" id="search-input" placeholder="搜索堆栈hash或堆栈内容..." oninput="debounceSearch()">
+      <select id="pkg-filter" onchange="onPkgChange();loadCrashes(1)"><option value="">全部包</option></select>
+      <select id="ver-filter" onchange="loadCrashes(1)"><option value="">全部版本</option></select>
+      <select id="status-filter" onchange="loadCrashes(1)">
+        <option value="">全部状态</option>
+        <option value="unresolved">未解决</option>
+        <option value="wontfix">解不动</option>
+        <option value="resolved">已解决</option>
+      </select>
+      <button class="btn primary" id="compare-btn" style="display:none" onclick="compareStacks()">对比选中堆栈</button>
+    </div>
+    <div class="table-wrap">
+      <table><thead><tr>
+        <th style="width:32px"><input type="checkbox" id="select-all" onchange="toggleSelectAll()"></th>
+        <th>崩溃次数</th><th>堆栈信息</th><th>涉及版本</th><th>最近崩溃</th><th>状态</th><th>趋势</th>
+      </tr></thead><tbody id="crash-tbody"></tbody></table>
+      <div class="empty" id="empty-msg" style="display:none;">暂无数据</div>
+    </div>
+    <div class="pagination" id="pagination"></div>
+  </div>
+
+  <div class="tab-panel" id="tab-version">
+    <div class="toolbar" style="margin-bottom:12px">
+      <select id="version-pkg-filter" onchange="loadVersionStats()"><option value="">选择包...</option></select>
+    </div>
+    <div class="version-table">
+      <table><thead><tr><th>版本</th><th>崩溃次数</th><th>已解决</th><th>解决进度</th></tr></thead>
+      <tbody id="version-tbody"><tr><td colspan="4" class="empty">请选择包名</td></tr></tbody></table>
+    </div>
+  </div>
+
+  <div class="tab-panel" id="tab-imports">
+    <div class="table-wrap">
+      <table><thead><tr><th>文件名</th><th>文件行数</th><th>导入行数</th><th>导入时间</th></tr></thead>
+      <tbody id="import-tbody"></tbody></table>
+      <div class="empty" id="import-empty-msg" style="display:none;">暂无数据</div>
+    </div>
+    <div class="pagination" id="import-pagination"></div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="detail-overlay" onclick="if(event.target===this)closeDetail()">
+  <div class="modal">
+    <button class="close" onclick="closeDetail()">&times;</button>
+    <h2>崩溃详情</h2>
+    <div class="stack-section" id="stack-section" style="display:none;">
+      <h3>崩溃堆栈 <button class="btn sm" style="margin-left:8px;" onclick="copyStack()">复制</button></h3>
+      <pre class="stack-pre" id="stack-text"></pre>
+    </div>
+    <div class="stack-section" id="symbolicated-section" style="display:none;">
+      <h3>符号化堆栈 <button class="btn sm" id="copy-sym-btn" style="margin-left:8px;display:none;" onclick="copySymbolicated()">复制</button> <button class="btn sm" style="margin-left:4px;" onclick="showSymbolicateModal()">更新</button></h3>
+      <pre class="stack-pre" id="symbolicated-text" style="display:none;"></pre>
+    </div>
+    <div style="height:16px;"></div>
+    <div class="detail-grid" id="detail-grid"></div>
+    <div class="resolve-section" id="resolve-section">
+      <h3>解决状态</h3>
+      <div class="resolve-form" id="resolve-form"></div>
+      <div id="resolve-msg"></div>
+    </div>
+  </div>
+</div>
+
+
+<div class="modal-overlay" id="trend-overlay" onclick="if(event.target===this)closeTrend()">
+  <div class="modal" style="max-width:920px;">
+    <button class="close" onclick="closeTrend()">&times;</button>
+    <h2>崩溃趋势 <span id="trend-title" style="font-size:14px;color:#6b7280;"></span></h2>
+    <div class="toolbar" style="margin-bottom:12px;">
+      <span style="font-size:13px;color:#6b7280;">崩溃版本</span>
+      <select id="trend-ver-filter" onchange="onTrendVerChange()"><option value="">全部版本</option></select>
+      <span id="trend-empty" style="display:none;font-size:13px;color:#9ca3af;">该版本在最近 30 天内无崩溃记录</span>
+    </div>
+    <div style="position:relative;height:400px;">
+      <canvas id="trend-chart"></canvas>
+    </div>
+  </div>
+</div>
+
+
+<div class="modal-overlay" id="symbolicate-overlay" onclick="if(event.target===this)closeSymbolicateModal()">
+  <div class="modal" style="max-width:860px;">
+    <button class="close" onclick="closeSymbolicateModal()">&times;</button>
+    <h2>更新符号化堆栈</h2>
+    <textarea id="symbolicate-input" style="width:100%;height:50vh;background:#1e293b;border:1px solid #334155;border-radius:6px;padding:16px;font-family:"JetBrains Mono","Fira Code",monospace;font-size:12px;line-height:1.6;color:#e2e8f0;resize:vertical;outline:none;white-space:pre;overflow:auto;" placeholder="粘贴符号化后的堆栈内容..."></textarea>
+    <div style="margin-top:16px;display:flex;justify-content:flex-end;gap:10px;">
+      <button class="btn" onclick="closeSymbolicateModal()">取消</button>
+      <button class="btn primary" onclick="doSymbolicate()">保存</button>
+    </div>
+    <div id="symbolicate-msg"></div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="compare-overlay" onclick="if(event.target===this)closeCompare()">
+  <div class="modal" style="max-width:1100px;overflow-y:auto;overscroll-behavior:contain;">
+    <button class="close" onclick="closeCompare()">&times;</button>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+      <h2 style="margin:0;">堆栈对比 <span id="compare-ids" style="font-size:14px;color:#6b7280;"></span></h2>
+      <div style="display:flex;align-items:center;gap:16px;">
+        <span style="font-size:15px;font-weight:700;">相似度: <span id="compare-similarity" style="color:#059669;font-size:20px;"></span></span>
+      </div>
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;">
+      <div style="min-width:0;display:flex;flex-direction:column;">
+        <div style="font-size:12px;color:#6b7280;margin-bottom:6px;font-weight:600;flex-shrink:0;">堆栈 A</div>
+        <pre class="stack-pre" id="compare-left" style="white-space:pre;word-break:normal;flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;"></pre>
+      </div>
+      <div style="min-width:0;display:flex;flex-direction:column;">
+        <div style="font-size:12px;color:#6b7280;margin-bottom:6px;font-weight:600;flex-shrink:0;">堆栈 B</div>
+        <pre class="stack-pre" id="compare-right" style="white-space:pre;word-break:normal;flex:1;min-height:0;overflow:auto;overscroll-behavior:contain;"></pre>
+      </div>
+    </div>
+    <div style="margin-top:20px;display:flex;justify-content:flex-end;gap:10px;">
+      <button class="btn primary" onclick="mergeStacks()">相同堆栈</button>
+      <button class="btn" onclick="closeCompare()">关闭</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let currentPage = 1, totalPages = 1, searchTimer = null;
+let importPage = 1, importTotalPages = 1;
+let currentDetail = null;
+let selectedStacks = new Set();
+let compareIds = null;
+
+function toggleSelectAll() {
+  const checked = document.getElementById('select-all').checked;
+  document.querySelectorAll('.stack-cb').forEach(cb => { cb.checked = checked; });
+  onSelectChange();
+}
+
+function onSelectChange() {
+  selectedStacks.clear();
+  document.querySelectorAll('.stack-cb:checked').forEach(cb => selectedStacks.add(parseInt(cb.value)));
+  document.getElementById('compare-btn').style.display = selectedStacks.size === 2 ? '' : 'none';
+  document.getElementById('select-all').checked = selectedStacks.size > 0 && selectedStacks.size === document.querySelectorAll('.stack-cb').length;
+}
+
+function compareStacks() {
+  const ids = [...selectedStacks];
+  if (ids.length !== 2) return;
+  Promise.all([
+    fetch('/api/stack/' + ids[0]).then(r=>r.json()),
+    fetch('/api/stack/' + ids[1]).then(r=>r.json())
+  ]).then(([s1, s2]) => {
+    if (s1.error || s2.error) return;
+    compareIds = [s1.id, s2.id];
+    document.getElementById('compare-ids').textContent = '#' + s1.id + ' vs #' + s2.id;
+    const lines1 = (s1.stack_text || '').split('\n').filter(Boolean);
+    const lines2 = (s2.stack_text || '').split('\n').filter(Boolean);
+    const set1 = new Set(lines1), set2 = new Set(lines2);
+    let common = 0;
+    set1.forEach(l => { if (set2.has(l)) common++; });
+    const sim = lines1.length + lines2.length > 0 ? (2 * common / (lines1.length + lines2.length) * 100).toFixed(1) : '100.0';
+    document.getElementById('compare-similarity').textContent = sim + '%';
+    document.getElementById('compare-left').innerHTML = lines1.map(l => {
+      const cls = set2.has(l) ? '' : 'diff-unique';
+      return '<div>' + (cls ? '<span class="' + cls + '">' + esc(l) + '</span>' : esc(l)) + '</div>';
+    }).join('');
+    document.getElementById('compare-right').innerHTML = lines2.map(l => {
+      const cls = set1.has(l) ? '' : 'diff-unique';
+      return '<div>' + (cls ? '<span class="' + cls + '">' + esc(l) + '</span>' : esc(l)) + '</div>';
+    }).join('');
+    document.body.style.overflow = 'hidden';
+    document.getElementById('compare-overlay').classList.add('active');
+  });
+}
+
+function mergeStacks() {
+  if (!compareIds) return;
+  if (!confirm('确定将这两个堆栈合并？')) return;
+  const source = Math.min(compareIds[0], compareIds[1]);
+  const target = Math.max(compareIds[0], compareIds[1]);
+  fetch('/api/stack/merge', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({id1: compareIds[0], id2: compareIds[1]})
+  }).then(r=>r.json()).then(d => {
+    if (d.ok) { closeCompare(); loadCrashes(1); }
+    else { alert('合并失败: ' + (d.error||'')); }
+  });
+}
+
+function closeCompare() { document.getElementById('compare-overlay').classList.remove('active'); compareIds = null; document.body.style.overflow = ''; }
+
+function debounceSearch() { clearTimeout(searchTimer); searchTimer = setTimeout(() => loadCrashes(1), 350); }
+
+function switchTab(idx) {
+  document.querySelectorAll('.tab-btn').forEach((b, i) => b.classList.toggle('active', i === idx));
+  document.querySelectorAll('.tab-panel').forEach((p, i) => p.classList.toggle('active', i === idx));
+  if (idx === 1) loadPackages();
+  if (idx === 2) loadImportLogs(1);
+}
+
+function loadPackages() {
+  fetch('/api/packages').then(r=>r.json()).then(pkgs => {
+    const names = [...new Set(pkgs.map(p => p.name))];
+    const sel = document.getElementById('pkg-filter');
+    const vsel = document.getElementById('version-pkg-filter');
+    if (sel.options.length > 1) return;
+    names.forEach(name => {
+      const count = pkgs.filter(p=>p.name===name).reduce((s,p)=>s+p.crash_count,0);
+      const o1 = document.createElement('option');
+      o1.value = name; o1.textContent = name + ' (' + count + ')';
+      sel.appendChild(o1);
+      const o2 = document.createElement('option');
+      o2.value = name; o2.textContent = name;
+      vsel.appendChild(o2);
+    });
+  });
+}
+
+function loadVersionStats() {
+  const pkg = document.getElementById('version-pkg-filter').value;
+  const tbody = document.getElementById('version-tbody');
+  if (!pkg) { tbody.innerHTML = '<tr><td colspan="4" class="empty">请选择包名</td></tr>'; return; }
+  fetch('/api/package/versions?name=' + encodeURIComponent(pkg)).then(r=>r.json()).then(vers => {
+    if (!vers || vers.length === 0) { tbody.innerHTML = '<tr><td colspan="4" class="empty">无数据</td></tr>'; return; }
+    vers.sort((a,b) => b.crash_count - a.crash_count);
+    tbody.innerHTML = vers.map(r => {
+      const pct = r.crash_count > 0 ? Math.round(r.resolved_count / r.crash_count * 100) : 0;
+      return `<tr>
+        <td class="mono">${esc(r.version)}</td>
+        <td>${r.crash_count}</td>
+        <td>${r.resolved_count}</td>
+        <td><div class="version-bar-wrap"><div class="version-bar"><div class="fill" style="width:${pct}%"></div></div><span style="font-size:12px;color:#6b7280;">${pct}%</span></div></td>
+      </tr>`;
+    }).join('');
+  });
+}
+
+function loadImportLogs(page) {
+  importPage = page;
+  fetch('/api/import-logs?page=' + page + '&per_page=20').then(r=>r.json()).then(data => {
+    importTotalPages = data.pages || 1;
+    const tbody = document.getElementById('import-tbody');
+    const empty = document.getElementById('import-empty-msg');
+    if (!data.data || data.data.length === 0) {
+      tbody.innerHTML = ''; empty.style.display = 'block';
+    } else {
+      empty.style.display = 'none';
+      tbody.innerHTML = data.data.map(r => {
+        const cls = r.imported_rows > 0 ? 'full' : 'zero';
+        return `<tr>
+          <td class="mono" style="font-size:12px;">${esc(r.file_name)}</td>
+          <td>${r.file_rows}</td>
+          <td><span class="status-tag ${cls}">${r.imported_rows}</span></td>
+          <td style="font-size:12px;color:#6b7280;">${esc(r.imported_at)}</td>
+        </tr>`;
+      }).join('');
+    }
+    renderImportPagination();
+  });
+}
+
+function renderImportPagination() {
+  const el = document.getElementById('import-pagination');
+  if (importTotalPages <= 1) { el.innerHTML = ''; return; }
+  let html = `<button ${importPage<=1?'disabled':''} onclick="loadImportLogs(${importPage-1})">&lt;</button>`;
+  const range = getPageRange(importPage, importTotalPages);
+  range.forEach(p => {
+    if (p === '...') html += '<span class="page-info">...</span>';
+    else html += `<button class="${p===importPage?'active':''}" onclick="loadImportLogs(${p})">${p}</button>`;
+  });
+  html += `<button ${importPage>=importTotalPages?'disabled':''} onclick="loadImportLogs(${importPage+1})">&gt;</button>`;
+  html += `<span class="page-info">${importPage} / ${importTotalPages}</span>`;
+  el.innerHTML = html;
+}
+
+function onPkgChange() {
+  const pkg = document.getElementById('pkg-filter').value;
+  const sel = document.getElementById('ver-filter');
+  sel.innerHTML = '<option value="">全部版本</option>';
+  if (!pkg) return;
+  fetch('/api/package/versions?name=' + encodeURIComponent(pkg)).then(r=>r.json()).then(vers => {
+    vers.slice().sort((a,b) => cmpVersion(a.version, b.version)).forEach(v => {
+      const o = document.createElement('option');
+      o.value = v.version; o.textContent = v.version + ' (' + v.crash_count + ')';
+      sel.appendChild(o);
+    });
+  });
+}
+
+function loadCrashes(page) {
+  currentPage = page;
+  selectedStacks.clear();
+  document.getElementById('compare-btn').style.display = 'none';
+  const sa = document.getElementById('select-all'); if(sa) sa.checked = false;
+  const search = document.getElementById('search-input').value;
+  const pkg = document.getElementById('pkg-filter').value;
+  const ver = document.getElementById('ver-filter').value;
+  const status = document.getElementById('status-filter').value;
+  let url = '/api/crashes?page=' + page + '&per_page=20';
+  if (search) url += '&search=' + encodeURIComponent(search);
+  if (pkg) url += '&package=' + encodeURIComponent(pkg);
+  if (ver) url += '&version=' + encodeURIComponent(ver);
+  if (status) url += '&status=' + status;
+
+  fetch(url).then(r=>r.json()).then(data => {
+    totalPages = data.pages || 1;
+    const tbody = document.getElementById('crash-tbody');
+    const empty = document.getElementById('empty-msg');
+    if (!data.data || data.data.length === 0) {
+      tbody.innerHTML = ''; empty.style.display = 'block';
+    } else {
+      empty.style.display = 'none';
+      tbody.innerHTML = data.data.map(r => {
+        let statusClass, statusText;
+        if (r.resolved === 2) { statusClass = 'wontfix'; statusText = '解不动'; }
+        else if (r.resolved === 1) { statusClass = 'resolved'; statusText = '已解决'; }
+        else { statusClass = 'unresolved'; statusText = '未解决'; }
+        return `<tr class="clickable"><td onclick="event.stopPropagation()"><input type="checkbox" class="stack-cb" value="${r.id}" onchange="onSelectChange()"></td>
+          <td style="font-weight:700;color:#111827;" onclick="showDetail(${r.id})">${r.crash_count}</td>
+          <td style="max-width:400px;white-space:normal;line-height:1.4;font-size:12px;" title="${esc(r.stack_preview)}" onclick="showDetail(${r.id})">${esc(r.stack_preview)}</td>
+          <td class="mono" style="font-size:11px;" title="${esc(sortVersions(r.versions)||'')}" onclick="showDetail(${r.id})">${esc(sortVersions(r.versions)||'-')}</td>
+          <td style="font-size:12px;" onclick="showDetail(${r.id})">${esc(r.last_crash_time||'')}</td>
+          <td onclick="showDetail(${r.id})"><span class="status-tag ${statusClass}">${statusText}</span></td>
+          <td onclick="event.stopPropagation()"><button class="btn sm" onclick="showTrend(${r.id})">趋势</button></td>
+        </tr>`;
+      }).join('');
+    }
+    renderPagination();
+  });
+}
+
+function renderPagination() {
+  const el = document.getElementById('pagination');
+  if (totalPages <= 1) { el.innerHTML = ''; return; }
+  let html = `<button ${currentPage<=1?'disabled':''} onclick="loadCrashes(${currentPage-1})">&lt;</button>`;
+  const range = getPageRange(currentPage, totalPages);
+  range.forEach(p => {
+    if (p === '...') html += '<span class="page-info">...</span>';
+    else html += `<button class="${p===currentPage?'active':''}" onclick="loadCrashes(${p})">${p}</button>`;
+  });
+  html += `<button ${currentPage>=totalPages?'disabled':''} onclick="loadCrashes(${currentPage+1})">&gt;</button>`;
+  html += `<span class="page-info">${currentPage} / ${totalPages}</span>`;
+  el.innerHTML = html;
+}
+
+function getPageRange(cur, total) {
+  if (total <= 7) return Array.from({length:total},(_,i)=>i+1);
+  const pages = [1];
+  if (cur > 3) pages.push('...');
+  for (let i = Math.max(2, cur-1); i <= Math.min(total-1, cur+1); i++) pages.push(i);
+  if (cur < total-2) pages.push('...');
+  if (total > 1) pages.push(total);
+  return pages;
+}
+
+function showDetail(stackId) {
+  fetch('/api/stack/' + stackId).then(r=>r.json()).then(d => {
+    if (d.error) return;
+    currentDetail = d;
+    const grid = document.getElementById('detail-grid');
+    let statusLabel, statusCls;
+    if (d.resolved === 2) { statusLabel = '解不动'; statusCls = 'wontfix'; }
+    else if (d.resolved === 1) { statusLabel = '已解决'; statusCls = 'resolved'; }
+    else { statusLabel = '未解决'; statusCls = 'unresolved'; }
+    const fields = [
+      ['包名', d.pkg_name], ['崩溃次数', d.crash_count],
+      ['崩溃MD5', d.stack_md5], ['二进制', d.binaries],
+      ['状态', statusLabel]
+    ];
+    if (d.resolved_version) fields.push(['解决版本', esc(d.resolved_version)]);
+    if (d.code_link) fields.push(['代码链接', '<a href="' + esc(d.code_link) + '" target="_blank">' + esc(d.code_link) + '</a>']);
+    if (d.reason) fields.push(['解决原因', esc(d.reason)]);
+    grid.innerHTML = fields.map(([l,v]) => `<div class="detail-item"><div class="dl">${l}</div><div class="dv">${v||'-'}</div></div>`).join('');
+    if (d.version_list && d.version_list.length) {
+      const vhtml = d.version_list.map(v => '<span class="mono" style="margin-right:12px;">' + esc(v.version) + ' <b style="color:#111827;">(' + v.count + ')</b></span>').join('');
+      grid.innerHTML += '<div class="detail-item" style="grid-column:1/-1"><div class="dl">涉及版本</div><div class="dv" style="line-height:1.8;">' + vhtml + '</div></div>';
+    }
+    const ss = document.getElementById('stack-section');
+    const st = document.getElementById('stack-text');
+    if (d.stack_text) { ss.style.display='block'; st.textContent=d.stack_text; }
+    else { ss.style.display='none'; }
+
+    const symSec = document.getElementById('symbolicated-section');
+    const symTxt = document.getElementById('symbolicated-text');
+    const copySymBtn = document.getElementById('copy-sym-btn');
+    symSec.style.display='block';
+    if (d.symbolicated_stack) { symTxt.style.display='block'; symTxt.textContent=d.symbolicated_stack; copySymBtn.style.display=''; }
+    else { symTxt.style.display='none'; copySymBtn.style.display='none'; }
+
+    const rf = document.getElementById('resolve-form');
+    const statusTag = `<span class="status-tag ${statusCls}">${statusLabel}</span>`;
+    if (d.resolved) {
+      rf.innerHTML = statusTag + ' <button class="btn sm unresolve" onclick="doResolve(\'unresolve\')">还原为未解决</button>';
+    } else {
+      rf.innerHTML = statusTag + `
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:8px;">
+          <input type="text" id="code-link-input" placeholder="修复代码链接（必填）" value="${esc(d.code_link||'')}">
+          <input type="text" id="resolved-ver-input" placeholder="解决版本（必填）" value="${esc(d.resolved_version||'')}">
+          <button class="btn sm resolve" onclick="doResolve('fixed')">标记已解决</button>
+        </div>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:8px;">
+          <input type="text" id="reason-input" placeholder="解不动原因（必填）" value="${esc(d.reason||'')}">
+          <button class="btn sm" style="border-color:#d97706;color:#d97706;" onclick="doResolve('wontfix')">标记解不动</button>
+        </div>`;
+    }
+    document.getElementById('resolve-msg').innerHTML = '';
+    document.getElementById('detail-overlay').classList.add('active');
+  });
+}
+
+function doResolve(type) {
+  if (!currentDetail) return;
+  const link = document.getElementById('code-link-input');
+  const reasonEl = document.getElementById('reason-input');
+  const msg = document.getElementById('resolve-msg');
+  let body;
+  if (type === 'fixed') {
+    const code_link = link ? link.value.trim() : '';
+    const verEl = document.getElementById('resolved-ver-input');
+    const resolved_version = verEl ? verEl.value.trim() : '';
+    let err = '';
+    if (!code_link) { err = '请填写修复代码链接'; if (link) link.classList.add('err-border'); }
+    if (!resolved_version) { err = err ? err + '；请填写解决版本' : '请填写解决版本'; if (verEl) verEl.classList.add('err-border'); }
+    if (err) { msg.innerHTML = '<div class="msg err">' + err + '</div>'; return; }
+    if (reasonEl) reasonEl.classList.remove('err-border');
+    body = {resolved: 1, code_link: code_link, reason: null, resolved_version: resolved_version};
+  } else if (type === 'wontfix') {
+    const reason = reasonEl ? reasonEl.value.trim() : '';
+    if (!reason) { if (reasonEl) reasonEl.classList.add('err-border'); msg.innerHTML = '<div class="msg err">请填写解不动原因</div>'; return; }
+    if (link) link.classList.remove('err-border');
+    body = {resolved: 2, code_link: null, reason: reason};
+  } else {
+    body = {resolved: 0, code_link: null, reason: null};
+  }
+  msg.innerHTML = '<div class="msg">处理中...</div>';
+  fetch('/api/stack/' + currentDetail.id + '/resolve', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(body)
+  }).then(r=>r.json()).then(d => {
+    if (d.ok) { msg.innerHTML='<div class="msg">操作成功</div>'; showDetail(currentDetail.id); }
+    else { msg.innerHTML='<div class="msg err">'+esc(d.error)+'</div>'; }
+  }).catch(e => { msg.innerHTML='<div class="msg err">请求失败: '+esc(e.message||e)+'</div>'; });
+}
+
+let trendChart = null;
+let trendStackId = null;
+let trendReq = 0;
+
+function showTrend(stackId) {
+  trendStackId = stackId;
+  document.getElementById('trend-title').textContent = '#' + stackId;
+  const sel = document.getElementById('trend-ver-filter');
+  sel.innerHTML = '<option value="">全部版本</option>';
+  document.getElementById('trend-overlay').classList.add('active');
+  loadTrend();
+  fetch('/api/stack/' + stackId + '/versions').then(r=>r.json()).then(vers => {
+    if (trendStackId !== stackId || !vers || !vers.length) return;
+    const opts = vers.slice().sort((a,b) => cmpVersion(a.version, b.version))
+      .map(v => `<option value="${esc(v.version)}">${esc(v.version)} (${v.count})</option>`).join('');
+    sel.innerHTML = '<option value="">全部版本</option>' + opts;
+    sel.value = '';
+  }).catch(() => {});
+}
+
+function onTrendVerChange() { if (trendStackId !== null) loadTrend(); }
+
+function loadTrend() {
+  if (trendStackId === null) return;
+  const stackId = trendStackId;
+  const ver = document.getElementById('trend-ver-filter').value;
+  const title = document.getElementById('trend-title');
+  const emptyEl = document.getElementById('trend-empty');
+  title.textContent = '#' + stackId + (ver ? ' · 版本 ' + ver : '');
+  emptyEl.style.display = 'none';
+  const token = ++trendReq;            // 丢弃过期响应，避免快速切换版本时图表错乱
+  let url = '/api/stack/' + stackId + '/trend?days=30';
+  if (ver) url += '&version=' + encodeURIComponent(ver);
+  fetch(url).then(r=>r.json()).then(data => {
+    if (token !== trendReq || trendStackId !== stackId) return;
+    // 同一个 canvas 复用前必须先销毁旧图表，否则 Chart.js 会报 Canvas is already in use
+    if (trendChart) { trendChart.destroy(); trendChart = null; }
+    const ctx = document.getElementById('trend-chart').getContext('2d');
+    if (!data.length) {
+      ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+      emptyEl.style.display = '';
+      return;
+    }
+    const labels = data.map(d => d.date.slice(5));
+    const counts = data.map(d => d.count);
+    trendChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: labels,
+        datasets: [{
+          label: ver ? ('崩溃次数 · ' + ver) : '崩溃次数',
+          data: counts,
+          borderColor: '#059669',
+          backgroundColor: 'rgba(5,150,105,0.1)',
+          fill: true,
+          tension: 0.3,
+          pointRadius: 3,
+          pointBackgroundColor: '#059669',
+        }]
+      },
+      plugins: [{
+        // 在每个数据点上方标出崩溃次数（chart.umd 不含 datalabels 插件，这里自己画）
+        id: 'pointValueLabels',
+        afterDatasetsDraw(chart) {
+          const meta = chart.getDatasetMeta(0);
+          if (!meta || !meta.data || !meta.data.length) return;
+          const c = chart.ctx;
+          const values = chart.data.datasets[0].data;
+          const pitch = meta.data.length > 1 ? Math.abs(meta.data[1].x - meta.data[0].x) : 999;
+          const stagger = pitch < 34;   // 点距太密时相邻标签交错到第二行，避免数字叠在一起
+          c.save();
+          c.font = '600 10px -apple-system, "PingFang SC", sans-serif';
+          c.textAlign = 'center';
+          c.textBaseline = 'bottom';
+          c.lineWidth = 3;
+          c.strokeStyle = '#ffffff';
+          c.fillStyle = '#059669';
+          meta.data.forEach((pt, i) => {
+            const v = values[i];
+            if (v === undefined || v === null || pt.skip) return;
+            const y = pt.y - 6 - (stagger && i % 2 ? 12 : 0);
+            c.strokeText(String(v), pt.x, y);   // 白描边，压在曲线上也看得清
+            c.fillText(String(v), pt.x, y);
+          });
+          c.restore();
+        }
+      }],
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        layout: { padding: { top: 16 } },   // 给最高点的标签留出空间
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { grid: { display: false }, ticks: { font: { size: 11 }, maxRotation: 45 } },
+          y: { beginAtZero: true, ticks: { stepSize: 1, font: { size: 11 } }, grid: { color: '#f3f4f6' } }
+        }
+      }
+    });
+  }).catch(e => {
+    if (token !== trendReq || trendStackId !== stackId) return;
+    title.textContent = '#' + stackId + ' 加载失败：' + (e.message || e);
+  });
+}
+
+function closeTrend() {
+  document.getElementById('trend-overlay').classList.remove('active');
+  trendStackId = null;
+  trendReq++;
+  if (trendChart) { trendChart.destroy(); trendChart = null; }
+}
+
+function copyStack() { const t = document.getElementById('stack-text'); const range = document.createRange(); range.selectNodeContents(t); const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range); try { document.execCommand('copy'); const btn = document.querySelector('#stack-section .btn'); btn.textContent = '已复制'; setTimeout(() => btn.textContent = '复制', 1500); } catch(e) {} sel.removeAllRanges(); }
+
+function copySymbolicated() { const t = document.getElementById('symbolicated-text'); const range = document.createRange(); range.selectNodeContents(t); const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range); try { document.execCommand('copy'); const btn = document.querySelector('#symbolicated-section .btn'); btn.textContent = '已复制'; setTimeout(() => btn.textContent = '复制', 1500); } catch(e) {} sel.removeAllRanges(); }
+
+function showSymbolicateModal() {
+  document.getElementById('symbolicate-input').value = document.getElementById('symbolicated-text').textContent;
+  document.getElementById('symbolicate-msg').innerHTML = '';
+  document.getElementById('symbolicate-overlay').classList.add('active');
+}
+function closeSymbolicateModal() { document.getElementById('symbolicate-overlay').classList.remove('active'); }
+function doSymbolicate() {
+  const val = document.getElementById('symbolicate-input').value.trim();
+  const msg = document.getElementById('symbolicate-msg');
+  if (!val) { msg.innerHTML='<div class="msg err">请输入符号化堆栈内容</div>'; return; }
+  msg.innerHTML='<div class="msg">保存中...</div>';
+  fetch('/api/stack/' + currentDetail.id + '/symbolicate', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({symbolicated_stack: val})
+  }).then(r=>r.json()).then(d => {
+    if (d.ok) { closeSymbolicateModal(); showDetail(currentDetail.id); }
+    else { msg.innerHTML='<div class="msg err">'+esc(d.error)+'</div>'; }
+  }).catch(e => { msg.innerHTML='<div class="msg err">请求失败: '+esc(e.message||e)+'</div>'; });
+}
+
+function closeDetail() { document.getElementById('detail-overlay').classList.remove('active'); currentDetail = null; }
+
+function verKey(v) {
+  const m = String(v == null ? '' : v).match(/\d+/g);
+  return m ? m.map(Number) : [];
+}
+
+// 版本号降序：按数字段逐段比较，完全相同时按字符串兜底
+function cmpVersion(a, b) {
+  const ka = verKey(a), kb = verKey(b);
+  for (let i = 0; i < Math.max(ka.length, kb.length); i++) {
+    const na = ka[i] || 0, nb = kb[i] || 0;
+    if (na !== nb) return nb - na;
+  }
+  return String(b == null ? '' : b).localeCompare(String(a == null ? '' : a));
+}
+
+function sortVersions(v) {
+  if (!v) return v;
+  return v.split(',').map(s => s.trim()).filter(Boolean).sort(cmpVersion).join(', ');
+}
+
+function esc(s) { if (!s) return ''; const d=document.createElement('div'); d.textContent=String(s); return d.innerHTML; }
+
+document.addEventListener('DOMContentLoaded', () => { loadPackages(); loadCrashes(1); });
+</script>
+</body>
+</html>
