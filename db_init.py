@@ -6,7 +6,8 @@ import pymysql
 def load_env(path=None):
     """读取脚本目录下的 .env（存在时），补齐未设置的环境变量。
 
-    不覆盖已在环境中存在的变量，因此 export 的优先级更高。
+    只在变量「不存在或为空」时写入，因此 shell 里显式 export 的值优先级更高，
+    但 `FOO= python3 script.py` 这种空值不会把 .env 里的配置挡掉。
     """
     env_path = path or os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')
     if not os.path.exists(env_path):
@@ -19,7 +20,7 @@ def load_env(path=None):
             key, value = line.split('=', 1)
             key = key.strip()
             value = value.strip().strip('"').strip("'")
-            if key and key not in os.environ:
+            if key and not os.environ.get(key):
                 os.environ[key] = value
 
 

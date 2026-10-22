@@ -26,7 +26,10 @@ PACKAGES = [
 
 def get_session():
     if not METABASE_USER or not METABASE_PASSWORD:
-        raise RuntimeError('请先设置环境变量 METABASE_BASE / METABASE_USER / METABASE_PASSWORD')
+        raise RuntimeError(
+            '缺少 Metabase 凭据：请在 {}/.env 中填写 METABASE_BASE / METABASE_USER / '
+            'METABASE_PASSWORD（可参考 .env.example）'.format(
+                os.path.dirname(os.path.abspath(__file__))))
     resp = requests.post(
         f'{METABASE_BASE}/api/session',
         json={'username': METABASE_USER, 'password': METABASE_PASSWORD},
