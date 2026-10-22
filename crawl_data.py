@@ -24,17 +24,35 @@ PACKAGES = [
 ]
 
 
+def make_http():
+    """内网 Metabase 走直连：trust_env=False 让它忽略 http_proxy/https_proxy/all_proxy。
+
+    否则系统代理（如 127.0.0.1:7890）会把内网地址一起接管，导致
+    ConnectionError('Connection aborted.', OSError(0, 'Error'))。
+    """
+    http = requests.Session()
+    http.trust_env = False
+    return http
+
+
+HTTP = make_http()
+
+
 def get_session():
     if not METABASE_USER or not METABASE_PASSWORD:
         raise RuntimeError(
             '缺少 Metabase 凭据：请在 {}/.env 中填写 METABASE_BASE / METABASE_USER / '
             'METABASE_PASSWORD（可参考 .env.example）'.format(
                 os.path.dirname(os.path.abspath(__file__))))
-    resp = requests.post(
-        f'{METABASE_BASE}/api/session',
-        json={'username': METABASE_USER, 'password': METABASE_PASSWORD},
-        timeout=30
-    )
+    try:
+        resp = HTTP.post(
+            f'{METABASE_BASE}/api/session',
+            json={'username': METABASE_USER, 'password': METABASE_PASSWORD},
+            timeout=30
+        )
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError('连接 Metabase 失败（{}）：{}；请确认能直连内网地址，'
+                           '并检查 .env 里的 METABASE_BASE'.format(METABASE_BASE, e))
     resp.raise_for_status()
     return resp.json()['id']
 
@@ -66,7 +84,7 @@ def build_query(package, date_str):
 
 def crawl_package(session, package, date_str):
     headers = {'X-Metabase-Session': session, 'Content-Type': 'application/json'}
-    resp = requests.post(
+    resp = HTTP.post(
         f'{METABASE_BASE}/api/dataset',
         headers=headers,
         json=build_query(package, date_str),

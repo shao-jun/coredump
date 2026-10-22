@@ -98,6 +98,15 @@ python3 app.py                         # 启动 Web 服务，默认 http://0.0.0
 - 栈指纹只保留「函数 + 文件:行号」层面的文本，地址与偏移在入库前被剥离，便于跨版本比对
 - 未符号化的崩溃在界面上可一键触发符号化，成功后写回 `symbol_info` 缓存
 
+## 常见问题
+
+- **`ConnectionError: ('Connection aborted.', OSError(0, 'Error'))`**：系统代理把内网
+  Metabase 地址也接管了。`crawl_data.py` 已用 `trust_env=False` 的 Session 直连，
+  不受 `http_proxy`/`all_proxy` 影响；如果仍然连不上，用
+  `curl --noproxy '*' -sS -o /dev/null -w '%{http_code}\n' $METABASE_BASE/api/health` 确认是不通还是地址写错。
+- **`RuntimeError: 缺少 Metabase 凭据`**：项目根目录没有 `.env` 或其中的
+  `METABASE_USER`/`METABASE_PASSWORD` 为空，按 `.env.example` 补齐即可。
+
 ## 许可
 
 内部工具，未附带开源许可证。
