@@ -218,21 +218,46 @@ def api_packages():
 @app.route('/api/package/versions')
 def api_package_versions_by_name():
     name = request.args.get('name', '').strip()
+    sys_version = request.args.get('sys_version', '').strip()
     conn, cursor = get_db()
-    cursor.execute('''
+    sql = '''
         SELECT pi.version, COUNT(ci.id) as crash_count,
                SUM(CASE WHEN cs.resolved = 1 THEN 1 ELSE 0 END) as resolved_count
         FROM crash_info ci
         JOIN package_info pi ON ci.package_id = pi.id
         LEFT JOIN crash_stack cs ON ci.stack_id = cs.id
-        WHERE pi.name = %s
-        GROUP BY pi.version
-        ORDER BY pi.version DESC
-    ''', (name,))
+        WHERE pi.name = %s'''
+    params = [name]
+    if sys_version:
+        sql += ' AND ci.sys_version = %s'
+        params.append(sys_version)
+    sql += ' GROUP BY pi.version ORDER BY pi.version DESC'
+    cursor.execute(sql, params)
     rows = cursor.fetchall()
     cursor.close()
     conn.close()
     return jsonify([{'version': r[0], 'crash_count': r[1], 'resolved_count': r[2]} for r in rows])
+
+
+@app.route('/api/sys-versions')
+def api_sys_versions():
+    """系统版本列表（1075/1072 等），带崩溃次数；可按包名收窄。"""
+    name = request.args.get('package', '').strip()
+    conn, cursor = get_db()
+    where = "WHERE ci.sys_version IS NOT NULL AND ci.sys_version != ''"
+    params = []
+    if name:
+        where += ' AND pi.name = %s'
+        params.append(name)
+    cursor.execute('''
+        SELECT ci.sys_version, COUNT(*) as cnt
+        FROM crash_info ci
+        JOIN package_info pi ON ci.package_id = pi.id
+        ''' + where + ' GROUP BY ci.sys_version ORDER BY cnt DESC', params)
+    rows = cursor.fetchall()
+    cursor.close()
+    conn.close()
+    return jsonify([{'version': r[0], 'count': r[1]} for r in rows])
 
 
 @app.route('/api/package/<int:pkg_id>/versions')

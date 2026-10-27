@@ -32,7 +32,7 @@
 
 ![堆栈对比](docs/screenshots/04-compare.png)
 
-版本统计：按版本看崩溃量与解决进度。
+版本统计：按包版本看崩溃量与解决进度，右侧下拉可按系统版本（1075/1072 等）收窄。
 
 ![版本统计](docs/screenshots/05-version-stats.png)
 

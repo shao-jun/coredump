@@ -145,7 +145,8 @@ tbody td { padding:10px 16px; font-size:13px; color:#374151; max-width:220px; ov
 
   <div class="tab-panel" id="tab-version">
     <div class="toolbar" style="margin-bottom:12px">
-      <select id="version-pkg-filter" onchange="loadVersionStats()"><option value="">选择包...</option></select>
+      <select id="version-pkg-filter" onchange="onVersionPkgChange()"><option value="">选择包...</option></select>
+      <select id="version-sys-filter" onchange="loadVersionStats()"><option value="">全部系统版本</option></select>
     </div>
     <div class="version-table">
       <table><thead><tr><th>版本</th><th>崩溃次数</th><th>已解决</th><th>解决进度</th></tr></thead>
@@ -312,7 +313,7 @@ function debounceSearch() { clearTimeout(searchTimer); searchTimer = setTimeout(
 function switchTab(idx) {
   document.querySelectorAll('.tab-btn').forEach((b, i) => b.classList.toggle('active', i === idx));
   document.querySelectorAll('.tab-panel').forEach((p, i) => p.classList.toggle('active', i === idx));
-  if (idx === 1) loadPackages();
+  if (idx === 1) { loadPackages(); loadSysVersions(); }
   if (idx === 2) loadImportLogs(1);
 }
 
@@ -334,11 +335,33 @@ function loadPackages() {
   });
 }
 
+// 版本统计页的「系统版本」下拉：跟随所选包收窄，数字大的排在前面
+function loadSysVersions() {
+  const pkg = document.getElementById('version-pkg-filter').value;
+  const sel = document.getElementById('version-sys-filter');
+  const keep = sel.value;
+  const url = '/api/sys-versions' + (pkg ? '?package=' + encodeURIComponent(pkg) : '');
+  fetch(url).then(r=>r.json()).then(list => {
+    list.sort((a, b) => (parseFloat(b.version) || 0) - (parseFloat(a.version) || 0));
+    sel.innerHTML = '<option value="">全部系统版本</option>' + list.map(v =>
+      `<option value="${esc(v.version)}" title="${v.count} 次崩溃">${esc(v.version)}（${v.count}）</option>`).join('');
+    if (keep && list.some(v => v.version === keep)) sel.value = keep;
+  });
+}
+
+function onVersionPkgChange() {
+  loadSysVersions();
+  loadVersionStats();
+}
+
 function loadVersionStats() {
   const pkg = document.getElementById('version-pkg-filter').value;
+  const sysVer = document.getElementById('version-sys-filter').value;
   const tbody = document.getElementById('version-tbody');
   if (!pkg) { tbody.innerHTML = '<tr><td colspan="4" class="empty">请选择包名</td></tr>'; return; }
-  fetch('/api/package/versions?name=' + encodeURIComponent(pkg)).then(r=>r.json()).then(vers => {
+  let url = '/api/package/versions?name=' + encodeURIComponent(pkg);
+  if (sysVer) url += '&sys_version=' + encodeURIComponent(sysVer);
+  fetch(url).then(r=>r.json()).then(vers => {
     if (!vers || vers.length === 0) { tbody.innerHTML = '<tr><td colspan="4" class="empty">无数据</td></tr>'; return; }
     vers.sort((a,b) => b.crash_count - a.crash_count);
     tbody.innerHTML = vers.map(r => {
