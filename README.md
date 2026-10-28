@@ -48,13 +48,45 @@
 app.py              # Flask 应用与全部 API 路由
 db_init.py          # 建库建表（package_info / crash_info / crash_stack / crash_hash /
                     #   symbol_info / binary_info / imported_file）
+stack_stat.py       # 崩溃汇总表（stack_pv_stat / stack_stat）+ 索引维护，列表/统计的加速层
 crawl_data.py       # 从 Metabase 拉取崩溃数据 -> crawled_data/*.csv
 import_csv.py       # CSV 解析、栈清洗与入库
-auto_import.py      # 待导入 CSV 的增量导入
+auto_import.py      # 待导入 CSV 的增量导入（导完自动重建汇总表）
 templates/index.html# 单页前端（原生 JS + Chart.js）
 static/js/          # Chart.js 静态资源
 scripts/            # 辅助脚本
 ```
+
+## 性能
+
+150 万行的 `crash_info` 直接 `GROUP BY` 会把列表页拖到几十秒（深分页 30s、系统版本下拉 5.6s）。
+现在列表/统计类查询改读预聚合表，明细表只在导入时被扫描：
+
+| 查询 | 改造前 | 改造后 |
+|---|---|---|
+| 崩溃列表 第 1 页 | 0.37s | ~5ms |
+| 崩溃列表 第 50 页 | **29.6s** | ~17ms |
+| 崩溃列表 第 800 页 | — | ~18ms |
+| 系统版本下拉 | 5.6s | ~2ms |
+| 栈详情弹窗 | 1.7s | ~4ms |
+| 栈趋势（按版本） | 0.88s | ~0.09s |
+| 全文搜索（`LIKE` 扫栈文本） | 2.1s | ~0.4s（受 52MB 文本扫描限制） |
+
+两张汇总表：
+
+- `stack_pv_stat`（约 6 万行）：`(栈, 包, 版本, 系统版本) → 崩溃数, 最后时间`，供筛选/版本/系统版本统计。
+- `stack_stat`（约 3.4 万行）：`(栈) → 崩溃数, 最后时间, 主包, 版本列表`，按 `crash_count` 建索引，供默认列表与深分页。
+
+维护方式：
+
+```bash
+python3 stack_stat.py            # 建表 + 补索引 + 全量重建（150 万行明细约 15s）
+python3 stack_stat.py --schema   # 只建表和索引
+```
+
+`auto_import.py` 导入新数据后会自动重建；`/api/import` 在后台线程重建；
+手工 `python3 import_csv.py` 导完需自己跑一次 `python3 stack_stat.py`。
+界面若发现数字没更新，也可以 `POST /api/maintenance/rebuild` 手动触发。
 
 ## 依赖
 

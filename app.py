@@ -1,8 +1,36 @@
 import os
+import re
+import threading
+import time
+
 from flask import Flask, render_template, jsonify, request
 from db_init import get_connection
+import stack_stat
 
 app = Flask(__name__)
+
+# 简单进程内缓存：统计类查询（全表 COUNT、系统版本分布）数据不常变，
+# 缓存 60 秒，导入后主动失效。
+_CACHE = {}
+_CACHE_LOCK = threading.Lock()
+
+
+def cache_get(key, ttl=60):
+    with _CACHE_LOCK:
+        hit = _CACHE.get(key)
+    if hit and time.time() - hit[0] < ttl:
+        return hit[1]
+    return None
+
+
+def cache_set(key, value):
+    with _CACHE_LOCK:
+        _CACHE[key] = (time.time(), value)
+
+
+def cache_clear():
+    with _CACHE_LOCK:
+        _CACHE.clear()
 
 
 def get_db():
@@ -10,29 +38,46 @@ def get_db():
     conn.autocommit(True)
     cursor = conn.cursor()
     cursor.execute('USE coredump_db')
+    # 版本列表用 GROUP_CONCAT 拼接，默认 1KB 会被截断
+    cursor.execute('SET SESSION group_concat_max_len = 1048576')
     return conn, cursor
+
+
+def global_stats():
+    """总数/未解决/已解决/不修 + Top10 包，带缓存。"""
+    cached = cache_get('global_stats', 60)
+    if cached is not None:
+        return cached
+    conn, cursor = get_db()
+    cursor.execute('SELECT COALESCE(SUM(crash_count), 0) FROM stack_pv_stat')
+    total = int(cursor.fetchone()[0])
+    cursor.execute("SELECT v FROM stat_meta WHERE k = 'orphan_crashes'")
+    orphan = cursor.fetchone()
+    total += int(orphan[0]) if orphan else 0
+    cursor.execute('''SELECT
+            SUM(resolved = 0) AS unresolved,
+            SUM(resolved = 1) AS resolved,
+            SUM(resolved = 2) AS wontfix
+        FROM crash_stack WHERE same_stack IS NULL''')
+    row = cursor.fetchone()
+    unresolved, resolved, wontfix = (int(x or 0) for x in row)
+    cursor.execute('''
+        SELECT pi.name, pi.version, SUM(s.crash_count) AS cnt
+        FROM stack_pv_stat s
+        JOIN package_info pi ON pi.id = s.package_id
+        GROUP BY pi.id ORDER BY cnt DESC LIMIT 10
+    ''')
+    top_packages = [(r[0], r[1], int(r[2])) for r in cursor.fetchall()]
+    cursor.close()
+    conn.close()
+    result = (total, unresolved, resolved, wontfix, top_packages)
+    cache_set('global_stats', result)
+    return result
 
 
 @app.route('/')
 def index():
-    conn, cursor = get_db()
-    cursor.execute('SELECT COUNT(*) FROM crash_info')
-    total = cursor.fetchone()[0]
-    cursor.execute('SELECT COUNT(*) FROM crash_stack WHERE resolved = 0 AND same_stack IS NULL')
-    unresolved = cursor.fetchone()[0]
-    cursor.execute('SELECT COUNT(*) FROM crash_stack WHERE resolved = 1 AND same_stack IS NULL')
-    resolved = cursor.fetchone()[0]
-    cursor.execute('SELECT COUNT(*) FROM crash_stack WHERE resolved = 2 AND same_stack IS NULL')
-    wontfix = cursor.fetchone()[0]
-    cursor.execute('''
-        SELECT pi.name, pi.version, COUNT(ci.id) as cnt
-        FROM crash_info ci
-        JOIN package_info pi ON ci.package_id = pi.id
-        GROUP BY ci.package_id ORDER BY cnt DESC LIMIT 10
-    ''')
-    top_packages = cursor.fetchall()
-    cursor.close()
-    conn.close()
+    total, unresolved, resolved, wontfix, top_packages = global_stats()
     return render_template('index.html',
                            total=total, unresolved=unresolved, resolved=resolved,
                            wontfix=wontfix, top_packages=top_packages)
@@ -48,98 +93,126 @@ def api_crashes():
     status_filter = request.args.get('status', '').strip()
     offset = (page - 1) * per_page
 
+    cache_key = 'list:%s|%s|%s|%s|%s|%s' % (page, per_page, search, pkg_filter, ver_filter, status_filter)
+    cached = cache_get(cache_key, 30)
+    if cached is not None:
+        return jsonify(cached)
     conn, cursor = get_db()
     where_clauses = []
-    having_clauses = []
     params = []
 
+    # 搜索/状态过滤先在 3.4 万行的 crash_stack 上求 id 集合，再用 IN 过滤汇总表；
+    # 直接 join 会让 52MB 的 stack_text 参与分组排序，是搜索慢的主因
+    stack_conds, stack_params = [], []
     if search:
-        where_clauses.append('(cs.stack_md5 LIKE %s OR LEFT(cs.stack_text, 200) LIKE %s)')
-        params.extend([f'%{search}%', f'%{search}%'])
+        if re.fullmatch(r'[0-9a-fA-F]{32}', search):
+            stack_conds.append('stack_md5 = %s')
+            stack_params.append(search.lower())
+        else:
+            stack_conds.append('stack_text LIKE %s')
+            stack_params.append('%' + search + '%')
+    if status_filter in ('resolved', 'wontfix', 'unresolved'):
+        stack_conds.append('resolved = %s')
+        stack_params.append({'resolved': 1, 'wontfix': 2, 'unresolved': 0}[status_filter])
+    if stack_conds:
+        where_clauses.append('s.stack_key IN (SELECT id FROM crash_stack WHERE %s)'
+                             % ' AND '.join(stack_conds))
+        params.extend(stack_params)
     if pkg_filter:
         where_clauses.append('pi.name = %s')
         params.append(pkg_filter)
     if ver_filter:
-        where_clauses.append('pi.version = %s')
+        where_clauses.append('s.version = %s')
         params.append(ver_filter)
-    if status_filter == 'resolved':
-        having_clauses.append('MAX(cs.resolved) = 1')
-    elif status_filter == 'wontfix':
-        having_clauses.append('MAX(cs.resolved) = 2')
-    elif status_filter == 'unresolved':
-        having_clauses.append('MAX(cs.resolved) = 0')
 
     where_sql = (' WHERE ' + ' AND '.join(where_clauses)) if where_clauses else ''
-    having_sql = (' HAVING ' + ' AND '.join(having_clauses)) if having_clauses else ''
 
-    cursor.execute(f'''
-        SELECT COUNT(*) FROM (
-            SELECT cs.id
-            FROM crash_info ci
-            JOIN crash_stack cs ON ci.stack_id = cs.id
-            LEFT JOIN crash_stack cs2 ON cs.same_stack = cs2.id
-            JOIN package_info pi ON ci.package_id = pi.id
-            {where_sql}
-            GROUP BY COALESCE(cs2.id, cs.id)
-        ) t
-    ''', params)
+    if not where_clauses:
+        # 默认视图（无搜索/筛选）：直接读按栈预聚合表，走 crash_count 索引，
+        # 翻到几百页也不用临时表排序
+        cursor.execute('SELECT COUNT(*) FROM stack_stat')
+        total = cursor.fetchone()[0]
+        cursor.execute('''
+            SELECT x.stack_key, cs.stack_md5, cs.stack_text,
+                   cs.resolved, cs.code_link, x.crash_count,
+                   FROM_UNIXTIME(x.last_crash_time, "%%Y-%%m-%%d %%H:%%i:%%s") as last_crash_time,
+                   pi.name, x.versions
+            FROM (
+                SELECT stack_key, crash_count, last_crash_time, pkg_id, versions
+                FROM stack_stat
+                ORDER BY crash_count DESC
+                LIMIT %s OFFSET %s
+            ) x
+            LEFT JOIN crash_stack cs ON cs.id = x.stack_key
+            LEFT JOIN package_info pi ON pi.id = x.pkg_id
+            ORDER BY x.crash_count DESC
+        ''', (per_page, offset))
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return _crash_list_response(rows, total, page, per_page, cache_key)
+
+    # 只扫 6 万行汇总表；栈文本/状态过滤已折成 IN (子查询)，这里不再 join crash_stack
+    from_sql = '''
+        FROM stack_pv_stat s
+        JOIN package_info pi ON pi.id = s.package_id
+    ''' + where_sql
+
+    cursor.execute(f'SELECT COUNT(DISTINCT s.stack_key) {from_sql}', params)
     total = cursor.fetchone()[0]
 
     cursor.execute(f'''
-        SELECT COALESCE(cs2.id, cs.id), COALESCE(cs2.stack_md5, cs.stack_md5),
-               COALESCE(cs2.stack_text, cs.stack_text),
-               COALESCE(cs2.resolved, cs.resolved) as resolved,
-               COALESCE(cs2.code_link, cs.code_link) as code_link,
-               COUNT(ci.id) as crash_count,
-               MAX(FROM_UNIXTIME(ci.crash_time, "%%Y-%%m-%%d %%H:%%i:%%s")) as last_crash_time,
-               pi.name as pkg_name,
-               MAX(ci.process_id) as process_id,
-               GROUP_CONCAT(DISTINCT pi.version ORDER BY pi.version DESC SEPARATOR ', ') as versions
-        FROM crash_info ci
-        JOIN crash_stack cs ON ci.stack_id = cs.id
-        LEFT JOIN crash_stack cs2 ON cs.same_stack = cs2.id
-        JOIN package_info pi ON ci.package_id = pi.id
-        {where_sql}
-        GROUP BY COALESCE(cs2.id, cs.id)
-        {having_sql}
-        ORDER BY crash_count DESC
-        LIMIT %s OFFSET %s
-    ''', params + [per_page, offset])
+        SELECT x.stack_key, cs.stack_md5, cs.stack_text,
+               cs.resolved, cs.code_link, x.crash_count,
+               FROM_UNIXTIME(x.last_t, "%%Y-%%m-%%d %%H:%%i:%%s") as last_crash_time,
+               x.pkg_name, x.versions
+        FROM (
+            SELECT s.stack_key, SUM(s.crash_count) as crash_count,
+                   MAX(s.last_crash_time) as last_t,
+                   MAX(pi.name) as pkg_name,
+                   GROUP_CONCAT(DISTINCT s.version ORDER BY s.version DESC SEPARATOR ', ') as versions
+            {from_sql}
+            GROUP BY s.stack_key
+            ORDER BY crash_count DESC
+            LIMIT %s OFFSET %s
+        ) x
+        LEFT JOIN crash_stack cs ON cs.id = x.stack_key
+        ORDER BY x.crash_count DESC
+    '''.format(from_sql=from_sql), params + [per_page, offset])
     rows = cursor.fetchall()
     cursor.close()
     conn.close()
+    return _crash_list_response(rows, total, page, per_page, cache_key)
 
+
+def _crash_list_response(rows, total, page, per_page, cache_key=None):
     crashes = []
     for r in rows:
         stack_preview = r[2][:120].replace('\n', ' | ') if r[2] else ''
         crashes.append({
             'id': r[0], 'stack_md5': r[1], 'stack_preview': stack_preview,
-            'resolved': r[3], 'code_link': r[4], 'crash_count': r[5],
-            'last_crash_time': r[6], 'pkg_name': r[7], 'process_id': r[8],
-            'versions': r[9],
+            'resolved': r[3], 'code_link': r[4], 'crash_count': int(r[5]),
+            'last_crash_time': r[6], 'pkg_name': r[7], 'process_id': None,
+            'versions': r[8],
         })
 
-    return jsonify({
+    payload = {
         'total': total, 'page': page, 'per_page': per_page,
         'pages': (total + per_page - 1) // per_page,
         'data': crashes
-    })
+    }
+    if cache_key:
+        cache_set(cache_key, payload)
+    return jsonify(payload)
 
 
 @app.route('/api/stack/<int:stack_pk>')
 def api_stack_detail(stack_pk):
     conn, cursor = get_db()
     cursor.execute('''
-        SELECT cs.id, cs.stack_md5, cs.stack_text, cs.symbolicated_stack, cs.resolved, cs.code_link, cs.reason, cs.resolved_version,
-               COUNT(ci.id) as crash_count,
-               GROUP_CONCAT(DISTINCT bi.binary_name SEPARATOR ', ') as binaries,
-               GROUP_CONCAT(DISTINCT pi.name ORDER BY pi.name SEPARATOR ', ') as pkg_name
-        FROM crash_stack cs
-        JOIN crash_info ci ON ci.stack_id = cs.id
-        JOIN package_info pi ON ci.package_id = pi.id
-        LEFT JOIN binary_info bi ON ci.binary_id = bi.id
-        WHERE cs.id = %s
-        GROUP BY cs.id
+        SELECT id, stack_md5, stack_text, symbolicated_stack, resolved, code_link,
+               reason, resolved_version
+        FROM crash_stack WHERE id = %s
     ''', (stack_pk,))
     row = cursor.fetchone()
     if not row:
@@ -147,13 +220,35 @@ def api_stack_detail(stack_pk):
         conn.close()
         return jsonify({'error': 'not found'}), 404
 
+    # 崩溃数/包名走汇总表，可执行文件走 (stack_id, binary_id) 覆盖索引，
+    # 不再对几十万行 crash_info 做 DISTINCT + 双表 join
     cursor.execute('''
-        SELECT pi.version, COUNT(ci.id) as cnt
-        FROM crash_info ci
-        JOIN package_info pi ON ci.package_id = pi.id
-        WHERE ci.stack_id = %s
-        GROUP BY pi.version
-        ORDER BY cnt DESC
+        SELECT COALESCE(SUM(s.crash_count), 0),
+               GROUP_CONCAT(DISTINCT pi.name ORDER BY pi.name SEPARATOR ', ')
+        FROM stack_pv_stat s
+        JOIN package_info pi ON pi.id = s.package_id
+        WHERE s.stack_key = %s
+    ''', (stack_pk,))
+    crash_count, pkg_names = cursor.fetchone()
+
+    cursor.execute('SELECT DISTINCT binary_id FROM crash_info WHERE stack_id = %s', (stack_pk,))
+    bin_ids = [r[0] for r in cursor.fetchall() if r[0]]
+    binaries = None
+    if bin_ids:
+        cursor.execute(
+            'SELECT binary_name FROM binary_info WHERE id IN (%s)'
+            % ','.join(['%s'] * len(bin_ids)), bin_ids)
+        # 同一可执行文件有多个 buildid 记录，按名字去重
+        names = []
+        for (n,) in cursor.fetchall():
+            if n and n not in names:
+                names.append(n)
+        binaries = ', '.join(names) or None
+
+    cursor.execute('''
+        SELECT version, SUM(crash_count) as cnt
+        FROM stack_pv_stat WHERE stack_key = %s
+        GROUP BY version ORDER BY cnt DESC
     ''', (stack_pk,))
     version_rows = cursor.fetchall()
     cursor.close()
@@ -162,9 +257,10 @@ def api_stack_detail(stack_pk):
     return jsonify({
         'id': row[0], 'stack_md5': row[1], 'stack_text': row[2],
         'symbolicated_stack': row[3],
-        'resolved': row[4], 'code_link': row[5], 'reason': row[6], 'resolved_version': row[7], 'crash_count': row[8],
-        'binaries': row[9], 'pkg_name': row[10],
-        'version_list': [{'version': r[0], 'count': r[1]} for r in version_rows],
+        'resolved': row[4], 'code_link': row[5], 'reason': row[6], 'resolved_version': row[7],
+        'crash_count': int(crash_count or 0),
+        'binaries': binaries, 'pkg_name': pkg_names,
+        'version_list': [{'version': r[0], 'count': int(r[1] or 0)} for r in version_rows],
     })
 
 
@@ -204,15 +300,15 @@ def api_crash_detail(crash_pk):
 def api_packages():
     conn, cursor = get_db()
     cursor.execute('''
-        SELECT pi.id, pi.name, pi.version, COUNT(ci.id) as crash_count
+        SELECT pi.id, pi.name, pi.version, SUM(s.crash_count) as crash_count
         FROM package_info pi
-        LEFT JOIN crash_info ci ON ci.package_id = pi.id
+        LEFT JOIN stack_pv_stat s ON s.package_id = pi.id
         GROUP BY pi.id ORDER BY crash_count DESC
     ''')
     rows = cursor.fetchall()
     cursor.close()
     conn.close()
-    return jsonify([{'id': r[0], 'name': r[1], 'version': r[2], 'crash_count': r[3]} for r in rows])
+    return jsonify([{'id': r[0], 'name': r[1], 'version': r[2], 'crash_count': int(r[3] or 0)} for r in rows])
 
 
 @app.route('/api/package/versions')
@@ -221,91 +317,82 @@ def api_package_versions_by_name():
     sys_version = request.args.get('sys_version', '').strip()
     conn, cursor = get_db()
     sql = '''
-        SELECT pi.version, COUNT(ci.id) as crash_count,
-               SUM(CASE WHEN cs.resolved = 1 THEN 1 ELSE 0 END) as resolved_count
-        FROM crash_info ci
-        JOIN package_info pi ON ci.package_id = pi.id
-        LEFT JOIN crash_stack cs ON ci.stack_id = cs.id
+        SELECT s.version, SUM(s.crash_count) as crash_count,
+               SUM(CASE WHEN cs.resolved = 1 THEN s.crash_count ELSE 0 END) as resolved_count
+        FROM stack_pv_stat s
+        JOIN package_info pi ON pi.id = s.package_id
+        LEFT JOIN crash_stack cs ON cs.id = s.stack_key
         WHERE pi.name = %s'''
     params = [name]
     if sys_version:
-        sql += ' AND ci.sys_version = %s'
+        sql += ' AND s.sys_version = %s'
         params.append(sys_version)
-    sql += ' GROUP BY pi.version ORDER BY pi.version DESC'
+    sql += ' GROUP BY s.version ORDER BY s.version DESC'
     cursor.execute(sql, params)
     rows = cursor.fetchall()
     cursor.close()
     conn.close()
-    return jsonify([{'version': r[0], 'crash_count': r[1], 'resolved_count': r[2]} for r in rows])
+    return jsonify([{'version': r[0], 'crash_count': int(r[1] or 0), 'resolved_count': int(r[2] or 0)} for r in rows])
 
 
 @app.route('/api/sys-versions')
 def api_sys_versions():
     """系统版本列表（1075/1072 等），带崩溃次数；可按包名收窄。"""
     name = request.args.get('package', '').strip()
+    key = 'sys_versions:%s' % name
+    cached = cache_get(key, 120)
+    if cached is not None:
+        return jsonify(cached)
     conn, cursor = get_db()
-    where = "WHERE ci.sys_version IS NOT NULL AND ci.sys_version != ''"
-    params = []
     if name:
-        where += ' AND pi.name = %s'
-        params.append(name)
-    cursor.execute('''
-        SELECT ci.sys_version, COUNT(*) as cnt
-        FROM crash_info ci
-        JOIN package_info pi ON ci.package_id = pi.id
-        ''' + where + ' GROUP BY ci.sys_version ORDER BY cnt DESC', params)
-    rows = cursor.fetchall()
+        cursor.execute('''
+            SELECT s.sys_version, SUM(s.crash_count) as cnt
+            FROM stack_pv_stat s
+            JOIN package_info pi ON pi.id = s.package_id
+            WHERE s.sys_version != '' AND pi.name = %s
+            GROUP BY s.sys_version ORDER BY cnt DESC
+        ''', (name,))
+    else:
+        cursor.execute('''
+            SELECT sys_version, SUM(crash_count) as cnt
+            FROM stack_pv_stat WHERE sys_version != ''
+            GROUP BY sys_version ORDER BY cnt DESC
+        ''')
+    data = [{'version': r[0], 'count': int(r[1] or 0)} for r in cursor.fetchall()]
     cursor.close()
     conn.close()
-    return jsonify([{'version': r[0], 'count': r[1]} for r in rows])
+    cache_set(key, data)
+    return jsonify(data)
 
 
 @app.route('/api/package/<int:pkg_id>/versions')
 def api_package_versions(pkg_id):
     conn, cursor = get_db()
     cursor.execute('''
-        SELECT pi.version, COUNT(ci.id) as crash_count,
-               SUM(CASE WHEN cs.resolved = 1 THEN 1 ELSE 0 END) as resolved_count
-        FROM crash_info ci
-        JOIN package_info pi ON ci.package_id = pi.id
-        LEFT JOIN crash_stack cs ON ci.stack_id = cs.id
-        WHERE pi.id = %s
-        GROUP BY pi.version
-        ORDER BY pi.version DESC
+        SELECT s.version, SUM(s.crash_count) as crash_count,
+               SUM(CASE WHEN cs.resolved = 1 THEN s.crash_count ELSE 0 END) as resolved_count
+        FROM stack_pv_stat s
+        LEFT JOIN crash_stack cs ON cs.id = s.stack_key
+        WHERE s.package_id = %s
+        GROUP BY s.version
+        ORDER BY s.version DESC
     ''', (pkg_id,))
     rows = cursor.fetchall()
     cursor.close()
     conn.close()
-    return jsonify([{'version': r[0], 'crash_count': r[1], 'resolved_count': r[2]} for r in rows])
+    return jsonify([{'version': r[0], 'crash_count': int(r[1] or 0), 'resolved_count': int(r[2] or 0)} for r in rows])
 
 
 @app.route('/api/stats')
 def api_stats():
-    conn, cursor = get_db()
-    cursor.execute('SELECT COUNT(*) FROM crash_info')
-    total = cursor.fetchone()[0]
-    cursor.execute('SELECT COUNT(*) FROM crash_stack WHERE resolved = 0 AND same_stack IS NULL')
-    unresolved = cursor.fetchone()[0]
-    cursor.execute('SELECT COUNT(*) FROM crash_stack WHERE resolved = 1 AND same_stack IS NULL')
-    resolved = cursor.fetchone()[0]
-    cursor.execute('SELECT COUNT(*) FROM crash_stack WHERE resolved = 2 AND same_stack IS NULL')
-    wontfix = cursor.fetchone()[0]
-    cursor.execute('''
-        SELECT pi.name, pi.version, COUNT(ci.id) as cnt
-        FROM crash_info ci
-        JOIN package_info pi ON ci.package_id = pi.id
-        GROUP BY ci.package_id ORDER BY cnt DESC LIMIT 10
-    ''')
-    top = cursor.fetchall()
-    cursor.close()
-    conn.close()
-
+    total, unresolved, resolved, wontfix, top = global_stats()
     return jsonify({
         'total_crashes': total,
         'unresolved': unresolved,
         'resolved': resolved,
         'wontfix': wontfix,
-        'top_packages': [{'name': r[0], 'version': r[1], 'count': r[2]} for r in top]
+        'top_packages': [{'name': r[0], 'version': r[1], 'count': r[2]} for r in top],
+        'stats_rebuilt_at': stack_stat.rebuilt_at(),
     })
 
 
@@ -326,6 +413,7 @@ def api_resolve_stack(stack_pk):
             (resolved, code_link, reason, resolved_version, stack_pk)
         )
         conn.commit()
+        cache_clear()
         return jsonify({'ok': True})
     except Exception as e:
         conn.rollback()
@@ -400,6 +488,11 @@ def api_merge_stack():
             (new_canonical, old_canonical)
         )
         conn.commit()
+        try:
+            stack_stat.apply_merge(new_canonical, old_canonical)
+            cache_clear()
+        except Exception:
+            pass
         return jsonify({'ok': True})
     except Exception as e:
         conn.rollback()
@@ -414,43 +507,52 @@ def api_stack_versions(stack_pk):
     """该堆栈（含合并组）涉及的崩溃版本及次数，用于趋势弹窗的版本过滤下拉框"""
     conn, cursor = get_db()
     cursor.execute('''
-        SELECT pi.version, COUNT(ci.id) as cnt
-        FROM crash_info ci
-        JOIN package_info pi ON ci.package_id = pi.id
-        WHERE ci.stack_id IN (SELECT id FROM crash_stack WHERE id = %s OR same_stack = %s)
-          AND pi.version IS NOT NULL
-        GROUP BY pi.version
+        SELECT version, SUM(crash_count) as cnt
+        FROM stack_pv_stat
+        WHERE stack_key = %s AND version != ''
+        GROUP BY version
         ORDER BY cnt DESC
-    ''', (stack_pk, stack_pk))
+    ''', (stack_pk,))
     rows = cursor.fetchall()
     cursor.close()
     conn.close()
-    return jsonify([{'version': r[0], 'count': r[1]} for r in rows])
+    return jsonify([{'version': r[0], 'count': int(r[1] or 0)} for r in rows])
 
 
 @app.route('/api/stack/<int:stack_pk>/trend')
 def api_stack_trend(stack_pk):
     days = request.args.get('days', 30, type=int)
     version = request.args.get('version', '').strip()
+    ver_ids = None
+    if version:
+        tmp_conn, tmp_cursor = get_db()
+        tmp_cursor.execute('SELECT id FROM package_info WHERE version = %s', (version,))
+        ver_ids = [r[0] for r in tmp_cursor.fetchall()]
+        tmp_cursor.close()
+        tmp_conn.close()
+        if not ver_ids:
+            return jsonify([])
+    conn, cursor = get_db()
     ver_sql = ''
     params = [stack_pk, stack_pk, days]
-    if version:
-        ver_sql = ' AND pi.version = %s'
-        params.append(version)
-    conn, cursor = get_db()
+    if ver_ids:
+        # 先把版本解析成 package_id 列表，让优化器用 IN(...) 常量走索引
+        ver_sql = ' AND ci.package_id IN (%s)' % ','.join(['%s'] * len(ver_ids))
+        params.extend(ver_ids)
+    # 按「天序号」整数分组，比逐行 FROM_UNIXTIME 转换便宜；日期字符串在 Python 里拼
     cursor.execute(f'''
-        SELECT FROM_UNIXTIME(ci.crash_time, "%%Y-%%m-%%d") as day, COUNT(*) as cnt
+        SELECT ci.crash_time DIV 86400 as day_no, COUNT(*) as cnt
         FROM crash_info ci
-        LEFT JOIN package_info pi ON ci.package_id = pi.id
         WHERE ci.stack_id IN (SELECT id FROM crash_stack WHERE id = %s OR same_stack = %s)
           AND ci.crash_time >= UNIX_TIMESTAMP(DATE_SUB(CURDATE(), INTERVAL %s DAY))
           {ver_sql}
-        GROUP BY day ORDER BY day
+        GROUP BY day_no ORDER BY day_no
     ''', params)
     rows = cursor.fetchall()
     cursor.close()
     conn.close()
-    return jsonify([{'date': r[0], 'count': r[1]} for r in rows])
+    return jsonify([{'date': time.strftime('%Y-%m-%d', time.localtime(int(r[0]) * 86400)),
+                     'count': int(r[1])} for r in rows])
 
 
 @app.route('/api/crash/<int:crash_pk>/resolve', methods=['POST'])
@@ -472,6 +574,7 @@ def api_resolve_by_crash(crash_pk):
             (resolved, code_link, row[0])
         )
         conn.commit()
+        cache_clear()
         return jsonify({'ok': True})
     except Exception as e:
         conn.rollback()
@@ -512,9 +615,28 @@ def api_import():
     try:
         from import_csv import import_csv
         result = import_csv(csv_path, update_existing=data.get('update_existing', False))
-        return jsonify({'ok': True, 'imported': result['total'], 'skipped': result['skipped']})
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+    # 导入完成后后台重建汇总表（约 20 秒），不阻塞本次请求
+    threading.Thread(target=_rebuild_async, daemon=True).start()
+    return jsonify({'ok': True, 'imported': result['total'], 'skipped': result['skipped'],
+                    'stats_refreshing': True})
+
+
+def _rebuild_async():
+    try:
+        stack_stat.rebuild(verbose=False)
+        cache_clear()
+    except Exception:
+        app.logger.exception('汇总表重建失败')
+
+
+@app.route('/api/maintenance/rebuild', methods=['POST'])
+def api_rebuild_stats():
+    """手动重建汇总表（导入新数据后若发现列表数字没更新，可调一次）。"""
+    rows = stack_stat.rebuild(verbose=False)
+    cache_clear()
+    return jsonify({'ok': True, 'rows': rows, 'rebuilt_at': stack_stat.rebuilt_at()})
 
 
 if __name__ == '__main__':
