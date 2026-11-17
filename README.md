@@ -129,6 +129,7 @@ python3 crawl_data.py                  # 从最近导入日期的次日爬取到
 python3 crawl_data.py 2026-08-01 2026-08-25   # 指定日期区间
 python3 auto_import.py                 # 把 crawled_data 下的 CSV 增量入库
 python3 scripts/backfill_fields.py     # 给历史行补 arch/apt_id/baseline/cpu（只抓 5 个短字段）
+python3 scripts/recrawl_history.py     # 重抓被 2000 行上限截断的历史（只 INSERT，不动已有行）
 python3 app.py                         # 启动 Web 服务，默认 http://0.0.0.0:5000
 ```
 
@@ -150,7 +151,9 @@ python3 app.py                         # 启动 Web 服务，默认 http://0.0.0
 - **导出/导入只有 2000 条**：Metabase 对「无聚合」查询默认只返回 2000 行
   （系统设置 `max-results-bare-rows`），不是我们代码里的 LIMIT。`crawl_data.py` 现在每次请求都带
   `constraints: {max-results, max-results-bare-rows}`，把上限抬到 `METABASE_MAX_ROWS`（默认 20 万）；
-  返回行数触顶时会打印警告。历史数据如果是在修复前抓的，需要重新抓一遍才会补上被截断的行。
+  返回行数触顶时会打印警告。历史数据如果是在修复前抓的，用 `scripts/recrawl_history.py` 重抓：
+  它按（包, 日）重抓单日 ≥1000 行的天，只 INSERT 缺失的 `crash_id`，已有行一个字段都不改；
+  开工前会把 `crash_stack` 的可编辑列快照到 `crash_stack_backup_<日期>` 作兜底。
 - **`RuntimeError: 缺少 Metabase 凭据`**：项目根目录没有 `.env` 或其中的
   `METABASE_USER`/`METABASE_PASSWORD` 为空，按 `.env.example` 补齐即可。
 
