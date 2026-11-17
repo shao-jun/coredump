@@ -119,6 +119,7 @@ cp .env.example .env      # 按实际情况填写，.env 已被 .gitignore 忽�
 | `METABASE_USER` / `METABASE_PASSWORD` | Metabase 登录账号 | 无（必填） |
 | `METABASE_DATABASE_ID` | Metabase 中的数据库 ID | `10` |
 | `METABASE_SOURCE_TABLE` | 崩溃明细表 ID | `196` |
+| `METABASE_MAX_ROWS` | 单次查询最多返回行数，见下文「2000 行截断」 | `200000` |
 
 ## 使用
 
@@ -127,11 +128,15 @@ python3 db_init.py                     # 初始化数据库表
 python3 crawl_data.py                  # 从最近导入日期的次日爬取到今天
 python3 crawl_data.py 2026-08-01 2026-08-25   # 指定日期区间
 python3 auto_import.py                 # 把 crawled_data 下的 CSV 增量入库
+python3 scripts/backfill_fields.py     # 给历史行补 arch/apt_id/baseline/cpu（只抓 5 个短字段）
 python3 app.py                         # 启动 Web 服务，默认 http://0.0.0.0:5000
 ```
 
 ## 数据说明
 
+- `crash_info` 除崩溃本身外还带四个环境字段：`arch`（aarch64/x86_64）、`apt_id`（apt 源包 sha256）、
+  `baseline`（机型基线编号，如 `pro-20-hw-0009`）、`cpu`（CPU 型号）。导入时从 Excel/Metabase
+  同名列出直接写入；老数据用 `scripts/backfill_fields.py` 回填（只拉这 5 个短字段，不重抓堆栈）。
 - `crawled_data/*.csv` 为抓取到的原始数据，含用户机器标识等运行环境信息，默认不纳入版本管理
 - 栈指纹只保留「函数 + 文件:行号」层面的文本，地址与偏移在入库前被剥离，便于跨版本比对
 - 未符号化的崩溃在界面上可一键触发符号化，成功后写回 `symbol_info` 缓存
@@ -142,6 +147,10 @@ python3 app.py                         # 启动 Web 服务，默认 http://0.0.0
   Metabase 地址也接管了。`crawl_data.py` 已用 `trust_env=False` 的 Session 直连，
   不受 `http_proxy`/`all_proxy` 影响；如果仍然连不上，用
   `curl --noproxy '*' -sS -o /dev/null -w '%{http_code}\n' $METABASE_BASE/api/health` 确认是不通还是地址写错。
+- **导出/导入只有 2000 条**：Metabase 对「无聚合」查询默认只返回 2000 行
+  （系统设置 `max-results-bare-rows`），不是我们代码里的 LIMIT。`crawl_data.py` 现在每次请求都带
+  `constraints: {max-results, max-results-bare-rows}`，把上限抬到 `METABASE_MAX_ROWS`（默认 20 万）；
+  返回行数触顶时会打印警告。历史数据如果是在修复前抓的，需要重新抓一遍才会补上被截断的行。
 - **`RuntimeError: 缺少 Metabase 凭据`**：项目根目录没有 `.env` 或其中的
   `METABASE_USER`/`METABASE_PASSWORD` 为空，按 `.env.example` 补齐即可。
 

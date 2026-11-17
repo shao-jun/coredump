@@ -45,6 +45,14 @@ def parse_storage_path(storage_path):
 
 
 
+def _clip(value, max_len):
+    """按列宽截断，避免超长值导致 INSERT 失败。"""
+    if not value:
+        return None
+    value = value.strip()
+    return value[:max_len] if value else None
+
+
 def get_or_insert(cursor, table, unique_fields, insert_fields, insert_values):
     where = ' AND '.join(f"{k}=%s" for k in unique_fields)
     where_vals = tuple(unique_fields.values())
@@ -82,6 +90,11 @@ def import_csv(csv_path, update_existing=False):
                 buildid = row.get('buildid', '').strip()
                 stack_raw = row.get('stackinfo', '').strip()
                 exe_path = row.get('exe', '').strip()
+                # Excel/Metabase 里的硬件与环境字段（crash_info 新增列）
+                arch = _clip(row.get('arch', ''), 16)
+                apt_id = _clip(row.get('apt_id', ''), 64)
+                baseline = _clip(row.get('baseline', ''), 32)
+                cpu = _clip(row.get('cpu', ''), 64)
 
                 crash_hash, process_id, crash_time = parse_storage_path(storage_path)
 
@@ -156,18 +169,20 @@ def import_csv(csv_path, update_existing=False):
                 if existing:
                     if update_existing:
                         cursor.execute(
-                            "UPDATE crash_info SET sys_version=%s, crash_time=%s, package_id=%s, binary_id=%s, stack_id=%s, process_id=%s, symbol_id=%s WHERE crash_id=%s",
+                            "UPDATE crash_info SET sys_version=%s, crash_time=%s, package_id=%s, binary_id=%s, stack_id=%s, process_id=%s, symbol_id=%s, arch=%s, apt_id=%s, baseline=%s, cpu=%s WHERE crash_id=%s",
                             (sys_version, crash_time, package_id, binary_id,
-                             stack_id, process_id, symbol_id, crash_id)
+                             stack_id, process_id, symbol_id,
+                             arch, apt_id, baseline, cpu, crash_id)
                         )
                         count += 1
                     else:
                         skipped += 1
                 else:
                     cursor.execute(
-                        "INSERT INTO crash_info (crash_id, sys_version, crash_time, package_id, binary_id, stack_id, process_id, symbol_id) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                        "INSERT INTO crash_info (crash_id, sys_version, crash_time, package_id, binary_id, stack_id, process_id, symbol_id, arch, apt_id, baseline, cpu) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                         (crash_id, sys_version, crash_time, package_id, binary_id,
-                         stack_id, process_id, symbol_id)
+                         stack_id, process_id, symbol_id,
+                         arch, apt_id, baseline, cpu)
                     )
                     count += 1
 

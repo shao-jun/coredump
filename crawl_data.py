@@ -13,14 +13,19 @@ METABASE_PASSWORD = os.environ.get('METABASE_PASSWORD', '')
 DATABASE_ID = int(os.environ.get('METABASE_DATABASE_ID', 10))
 SOURCE_TABLE = int(os.environ.get('METABASE_SOURCE_TABLE', 196))
 
+# Metabase 默认对「无聚合」查询只返回 2000 行（max-results-bare-rows 系统设置），
+# 一天内崩溃超过 2000 条的包会被截断。通过请求里的 constraints 把上限抬到 MAX_ROWS。
+MAX_ROWS = int(os.environ.get('METABASE_MAX_ROWS', 200000))
+
 PACKAGES = [
-'kwin-x11',
-'kwin-wayland',
+#'kwin-x11',
+#'kwin-wayland',
 'dde-dock',
-'dde-session-ui',
-'dde-session-shell',
-'dde-launcher',
-'dde-control-center',
+#'dde-file-manager',
+#'dde-session-ui',
+#'dde-session-shell',
+#'dde-launcher',
+#'dde-control-center',
 ]
 
 
@@ -84,11 +89,14 @@ def build_query(package, date_str):
 
 def crawl_package(session, package, date_str):
     headers = {'X-Metabase-Session': session, 'Content-Type': 'application/json'}
+    payload = build_query(package, date_str)
+    # 解除 Metabase 的 2000 行上限：不加 constraints 时无聚合查询被截断在 2000 行
+    payload['constraints'] = {'max-results': MAX_ROWS, 'max-results-bare-rows': MAX_ROWS}
     resp = HTTP.post(
         f'{METABASE_BASE}/api/dataset',
         headers=headers,
-        json=build_query(package, date_str),
-        timeout=120
+        json=payload,
+        timeout=600
     )
     resp.raise_for_status()
     data = resp.json()
@@ -97,6 +105,9 @@ def crawl_package(session, package, date_str):
     cols = [c.get('name') for c in data.get('data', {}).get('cols', [])]
     if not rows or not cols:
         return 0, None
+    if len(rows) >= MAX_ROWS:
+        print(f'[警告] {package} {date_str} 返回 {len(rows)} 行，已达 MAX_ROWS 上限，'
+              f'可能仍有截断；请调大 METABASE_MAX_ROWS 或缩小日期范围')
 
     mapped = []
     for row in rows:

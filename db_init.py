@@ -37,6 +37,39 @@ def get_connection():
     )
 
 
+def ensure_crash_info_columns(cursor):
+    """老库补列：crash_info 后期加的字段（arch/apt_id/baseline/cpu 等）。
+
+    MariaDB 的 ADD COLUMN IF NOT EXISTS 各版本支持不一致，这里先查
+    information_schema 再决定是否 ALTER，重复执行安全。
+    """
+    wanted = {
+        'arch': "VARCHAR(16) COMMENT 'CPU 架构(aarch64/x86_64)'",
+        'apt_id': "VARCHAR(64) COMMENT 'apt 源包 ID(sha256)'",
+        'baseline': "VARCHAR(32) COMMENT '基线机型编号(pro-20-hw-0009)'",
+        'cpu': "VARCHAR(64) COMMENT 'CPU 型号'",
+    }
+    cursor.execute("""
+        SELECT COLUMN_NAME FROM information_schema.COLUMNS
+        WHERE TABLE_SCHEMA = 'coredump_db' AND TABLE_NAME = 'crash_info'
+    """)
+    existing = {r[0] for r in cursor.fetchall()}
+    clauses = [f"ADD COLUMN {col} {ddl}" for col, ddl in wanted.items() if col not in existing]
+
+    cursor.execute("""
+        SELECT INDEX_NAME FROM information_schema.STATISTICS
+        WHERE TABLE_SCHEMA = 'coredump_db' AND TABLE_NAME = 'crash_info'
+          AND INDEX_NAME = 'idx_arch_time'
+    """)
+    if not cursor.fetchone():
+        clauses.append("ADD KEY idx_arch_time (arch, crash_time)")
+
+    if clauses:
+        # 一次 ALTER 改完，避免多次重建 160 万行的表
+        cursor.execute("ALTER TABLE crash_info " + ", ".join(clauses))
+        print("crash_info 结构更新:", ", ".join(c.split()[1] for c in clauses))
+
+
 def init_database():
     conn = get_connection()
     cursor = conn.cursor()
@@ -66,12 +99,19 @@ def init_database():
             stack_id INT COMMENT '堆栈ID',
             process_id VARCHAR(64) COMMENT '进程ID',
             symbol_id INT COMMENT '符号ID',
+            arch VARCHAR(16) COMMENT 'CPU 架构(aarch64/x86_64)',
+            apt_id VARCHAR(64) COMMENT 'apt 源包 ID(sha256)',
+            baseline VARCHAR(32) COMMENT '基线机型编号(pro-20-hw-0009)',
+            cpu VARCHAR(64) COMMENT 'CPU 型号',
             UNIQUE KEY uk_crash_id (crash_id),
             KEY idx_package_id (package_id),
             KEY idx_stack_id (stack_id),
-            KEY idx_stack_time (stack_id, crash_time)
+            KEY idx_stack_time (stack_id, crash_time),
+            KEY idx_arch_time (arch, crash_time)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     """)
+
+    ensure_crash_info_columns(cursor)
 
     # c. 崩溃堆栈表
     cursor.execute("""
