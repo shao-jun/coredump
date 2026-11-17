@@ -135,7 +135,7 @@ def rebuild(verbose=True):
                CAST(SUBSTRING_INDEX(
                    GROUP_CONCAT(package_id ORDER BY crash_count DESC, package_id), ',', 1) AS UNSIGNED),
                GROUP_CONCAT(DISTINCT version ORDER BY version DESC SEPARATOR ', ')
-        FROM stack_pv_stat
+        FROM stack_pv_stat_new
         GROUP BY stack_key
     ''')
     stack_rows = cur.rowcount
