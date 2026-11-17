@@ -117,7 +117,8 @@ tbody td { padding:10px 16px; font-size:13px; color:#374151; max-width:220px; ov
   <div class="tabs">
     <button class="tab-btn active" onclick="switchTab(0)">崩溃记录</button>
     <button class="tab-btn" onclick="switchTab(1)">版本统计</button>
-    <button class="tab-btn" onclick="switchTab(2)">导入记录</button>
+    <button class="tab-btn" onclick="switchTab(2)">崩溃趋势</button>
+    <button class="tab-btn" onclick="switchTab(3)">导入记录</button>
   </div>
 
   <div class="tab-panel active" id="tab-crashes">
@@ -151,6 +152,38 @@ tbody td { padding:10px 16px; font-size:13px; color:#374151; max-width:220px; ov
     <div class="version-table">
       <table><thead><tr><th>版本</th><th>崩溃次数</th><th>已解决</th><th>解决进度</th></tr></thead>
       <tbody id="version-tbody"><tr><td colspan="4" class="empty">请选择包名</td></tr></tbody></table>
+    </div>
+  </div>
+
+  <div class="tab-panel" id="tab-trend">
+    <div class="toolbar" style="margin-bottom:12px">
+      <select id="tv-pkg" onchange="onTrendPkgChange()"><option value="">全部包</option></select>
+      <select id="tv-ver" onchange="loadTrendTabData()"><option value="">全部版本</option></select>
+      <select id="tv-sys" onchange="loadTrendTabData()"><option value="">全部系统版本</option></select>
+      <input type="date" id="tv-start" onchange="loadTrendTabData()"
+             style="background:#fff;border:1px solid #d1d5db;border-radius:6px;padding:7px 10px;font-size:14px;">
+      <span style="color:#9ca3af;">~</span>
+      <input type="date" id="tv-end" onchange="loadTrendTabData()"
+             style="background:#fff;border:1px solid #d1d5db;border-radius:6px;padding:7px 10px;font-size:14px;">
+      <button class="btn" data-range="7" onclick="setTrendRange(7, this)">近 7 天</button>
+      <button class="btn" data-range="30" onclick="setTrendRange(30, this)">近 30 天</button>
+      <button class="btn" data-range="90" onclick="setTrendRange(90, this)">近 90 天</button>
+      <button class="btn" data-range="365" onclick="setTrendRange(365, this)">近一年</button>
+    </div>
+    <div class="stats" style="grid-template-columns:repeat(3,1fr);margin-bottom:16px;">
+      <div class="stat-card"><div class="label">区间崩溃总数</div><div class="value green" id="tv-total" style="font-size:26px;">-</div></div>
+      <div class="stat-card"><div class="label">日均崩溃</div><div class="value" id="tv-avg" style="font-size:26px;">-</div></div>
+      <div class="stat-card"><div class="label">峰值日</div><div class="value red" id="tv-peak" style="font-size:20px;">-</div></div>
+    </div>
+    <div class="version-table" style="padding:18px 18px 10px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+        <div style="font-size:14px;font-weight:600;color:#111827;">崩溃次数（按天）</div>
+        <div id="tv-scope" style="font-size:12px;color:#6b7280;"></div>
+      </div>
+      <div style="height:380px;position:relative;">
+        <canvas id="tv-chart"></canvas>
+        <div class="empty" id="tv-empty" style="display:none;position:absolute;inset:0;align-items:center;justify-content:center;">该筛选条件下没有崩溃数据</div>
+      </div>
     </div>
   </div>
 
@@ -314,7 +347,191 @@ function switchTab(idx) {
   document.querySelectorAll('.tab-btn').forEach((b, i) => b.classList.toggle('active', i === idx));
   document.querySelectorAll('.tab-panel').forEach((p, i) => p.classList.toggle('active', i === idx));
   if (idx === 1) { loadPackages(); loadSysVersions(); }
-  if (idx === 2) loadImportLogs(1);
+  if (idx === 2) loadTrendTab();
+  if (idx === 3) loadImportLogs(1);
+}
+
+// ===== 崩溃趋势页 =====
+let tvChart = null;
+let tvReq = 0;
+let tvInited = false;
+
+// 日期一律按 UTC 取，和后端 crash_daily（crash_time DIV 86400）同一口径
+function tvDateStr(d) { return d.toISOString().slice(0, 10); }
+
+function tvDaysAgo(n) {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() - n);
+  return tvDateStr(d);
+}
+
+function loadTrendTab() {
+  const pkgSel = document.getElementById('tv-pkg');
+  if (!tvInited) {
+    tvInited = true;
+    document.getElementById('tv-start').value = tvDaysAgo(29);
+    document.getElementById('tv-end').value = tvDateStr(new Date());
+    fetch('/api/packages').then(r => r.json()).then(pkgs => {
+      const names = [...new Set(pkgs.map(p => p.name))];
+      names.forEach(n => {
+        const c = pkgs.filter(p => p.name === n).reduce((s, p) => s + p.crash_count, 0);
+        const o = document.createElement('option');
+        o.value = n; o.textContent = n + ' (' + c + ')';
+        pkgSel.appendChild(o);
+      });
+    });
+    loadTrendTabSys();
+  }
+  loadTrendTabData();
+}
+
+// 版本下拉跟随包名收窄
+function onTrendPkgChange() {
+  const pkg = document.getElementById('tv-pkg').value;
+  const verSel = document.getElementById('tv-ver');
+  verSel.innerHTML = '<option value="">全部版本</option>';
+  if (pkg) {
+    fetch('/api/package/versions?name=' + encodeURIComponent(pkg)).then(r => r.json()).then(vers => {
+      vers.sort((a, b) => cmpVersion(a.version, b.version));   // cmpVersion 本身是降序比较器
+      vers.forEach(v => {
+        const o = document.createElement('option');
+        o.value = v.version; o.textContent = v.version + ' (' + v.crash_count + ')';
+        verSel.appendChild(o);
+      });
+    });
+  }
+  loadTrendTabSys();
+  loadTrendTabData();
+}
+
+function loadTrendTabSys() {
+  const pkg = document.getElementById('tv-pkg').value;
+  const sel = document.getElementById('tv-sys');
+  const keep = sel.value;
+  fetch('/api/sys-versions' + (pkg ? '?package=' + encodeURIComponent(pkg) : ''))
+    .then(r => r.json()).then(list => {
+      list.sort((a, b) => (parseFloat(b.version) || 0) - (parseFloat(a.version) || 0));
+      sel.innerHTML = '<option value="">全部系统版本</option>' + list.map(v =>
+        `<option value="${esc(v.version)}" title="${v.count} 次崩溃">${esc(v.version)}（${v.count}）</option>`).join('');
+      if (keep && list.some(v => v.version === keep)) sel.value = keep;
+    });
+}
+
+function setTrendRange(n, btn) {
+  document.getElementById('tv-start').value = tvDaysAgo(n - 1);
+  document.getElementById('tv-end').value = tvDateStr(new Date());
+  document.querySelectorAll('[data-range]').forEach(b => b.classList.toggle('primary', b === btn));
+  loadTrendTabData();
+}
+
+function loadTrendTabData() {
+  const pkg = document.getElementById('tv-pkg').value;
+  const ver = document.getElementById('tv-ver').value;
+  const sys = document.getElementById('tv-sys').value;
+  const start = document.getElementById('tv-start').value;
+  const end = document.getElementById('tv-end').value;
+  if (!start || !end) return;
+
+  let url = '/api/trend?start=' + start + '&end=' + end;
+  if (pkg) url += '&package=' + encodeURIComponent(pkg);
+  if (ver) url += '&version=' + encodeURIComponent(ver);
+  if (sys) url += '&sys_version=' + encodeURIComponent(sys);
+
+  const token = ++tvReq;   // 丢弃过期响应，避免快速切换筛选时曲线错乱
+  fetch(url).then(r => r.json()).then(d => {
+    if (token !== tvReq) return;
+    if (d.error) { document.getElementById('tv-scope').textContent = d.error; return; }
+    document.getElementById('tv-total').textContent = d.total.toLocaleString();
+    document.getElementById('tv-avg').textContent = d.avg.toLocaleString();
+    document.getElementById('tv-peak').textContent = d.peak && d.peak.count
+      ? d.peak.date + '（' + d.peak.count.toLocaleString() + '）' : '-';
+    const scope = [];
+    if (pkg) scope.push(pkg); else scope.push('全部包');
+    if (ver) scope.push('版本 ' + ver);
+    if (sys) scope.push('系统 ' + sys);
+    scope.push(d.start + ' ~ ' + d.end + '（' + d.days.length + ' 天）');
+    document.getElementById('tv-scope').textContent = scope.join(' · ');
+    renderTrendTabChart(d.days, ver);
+  }).catch(e => {
+    if (token === tvReq) document.getElementById('tv-scope').textContent = '加载失败：' + (e.message || e);
+  });
+}
+
+function renderTrendTabChart(days, ver) {
+  const emptyEl = document.getElementById('tv-empty');
+  if (tvChart) { tvChart.destroy(); tvChart = null; }
+  const ctx = document.getElementById('tv-chart').getContext('2d');
+  if (!days.length || days.every(d => !d.count)) {
+    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+    emptyEl.style.display = 'flex';
+    return;
+  }
+  emptyEl.style.display = 'none';
+  tvChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: days.map(d => d.date.slice(5)),   // MM-DD
+      datasets: [{
+        label: ver ? ('崩溃次数 · ' + ver) : '崩溃次数',
+        data: days.map(d => d.count),
+        borderColor: '#059669',
+        backgroundColor: 'rgba(5,150,105,0.10)',
+        fill: true,
+        tension: 0.25,
+        borderWidth: 2,
+        pointRadius: days.length <= 60 ? 3 : 0,
+        pointHoverRadius: 4,
+        pointBackgroundColor: '#059669',
+      }]
+    },
+    plugins: [{
+      // 点少时标数值，点多时靠 tooltip（chart.umd 不带 datalabels 插件）
+      id: 'pointValueLabels',
+      afterDatasetsDraw(chart) {
+        if (chart.data.labels.length > 45) return;
+        const meta = chart.getDatasetMeta(0);
+        if (!meta || !meta.data || !meta.data.length) return;
+        const c = chart.ctx;
+        const values = chart.data.datasets[0].data;
+        const pitch = meta.data.length > 1 ? Math.abs(meta.data[1].x - meta.data[0].x) : 999;
+        const stagger = pitch < 34;
+        c.save();
+        c.font = '600 10px -apple-system, "PingFang SC", sans-serif';
+        c.textAlign = 'center';
+        c.textBaseline = 'bottom';
+        c.lineWidth = 3;
+        c.strokeStyle = '#ffffff';
+        c.fillStyle = '#059669';
+        meta.data.forEach((pt, i) => {
+          const v = values[i];
+          if (v === undefined || v === null || !v || pt.skip) return;   // 0 值不标，避免尾部挤满数字
+          const y = pt.y - 6 - (stagger && i % 2 ? 12 : 0);
+          c.strokeText(String(v), pt.x, y);
+          c.fillText(String(v), pt.x, y);
+        });
+        c.restore();
+      }
+    }],
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      layout: { padding: { top: 18 } },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            title: (items) => items.length ? (items[0].label + ' · ' + (ver || '合计')) : '',
+            label: (item) => '崩溃 ' + item.parsed.y.toLocaleString() + ' 次'
+          }
+        }
+      },
+      scales: {
+        x: { grid: { display: false }, ticks: { font: { size: 11 }, maxRotation: 45, autoSkip: true, maxTicksLimit: 24 } },
+        y: { beginAtZero: true, ticks: { font: { size: 11 } }, grid: { color: '#f3f4f6' } }
+      }
+    }
+  });
 }
 
 function loadPackages() {

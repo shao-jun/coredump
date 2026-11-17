@@ -1,3 +1,4 @@
+import calendar
 import os
 import re
 import threading
@@ -383,6 +384,75 @@ def api_package_versions(pkg_id):
     return jsonify([{'version': r[0], 'crash_count': int(r[1] or 0), 'resolved_count': int(r[2] or 0)} for r in rows])
 
 
+@app.route('/api/trend')
+def api_trend():
+    """崩溃趋势：按天返回指定包/版本/系统版本/时间范围内的崩溃次数。
+
+    参数：package(包名，空=全部)、version、sys_version、start、end(YYYY-MM-DD)
+    返回：{start, end, total, avg, peak, days:[{date, count}]}，缺失的天补 0。
+    """
+    pkg = request.args.get('package', '').strip()
+    version = request.args.get('version', '').strip()
+    sys_version = request.args.get('sys_version', '').strip()
+    today = time.strftime('%Y-%m-%d')
+    end_s = request.args.get('end', '').strip() or today
+    start_s = request.args.get('start', '').strip() or time.strftime(
+        '%Y-%m-%d', time.localtime(time.time() - 29 * 86400))
+    try:
+        # 与 crash_daily 的 crash_time DIV 86400 对齐：按 UTC 日切分，
+        # 用 mktime/localtime 会因东八区偏移整整错一天
+        d_end = int(calendar.timegm(time.strptime(end_s, '%Y-%m-%d')) // 86400)
+        d_start = int(calendar.timegm(time.strptime(start_s, '%Y-%m-%d')) // 86400)
+    except ValueError:
+        return jsonify({'error': '日期格式应为 YYYY-MM-DD'}), 400
+    if d_start > d_end:
+        d_start, d_end = d_end, d_start
+
+    cache_key = 'trend:%s|%s|%s|%s|%s' % (pkg, version, sys_version, d_start, d_end)
+    cached = cache_get(cache_key, 60)
+    if cached is not None:
+        return jsonify(cached)
+
+    conn, cursor = get_db()
+    where = ['day BETWEEN %s AND %s']
+    params = [d_start, d_end]
+    if pkg:
+        where.append('package_id IN (SELECT id FROM package_info WHERE name = %s)')
+        params.append(pkg)
+    if version:
+        where.append('version = %s')
+        params.append(version)
+    if sys_version:
+        where.append('sys_version = %s')
+        params.append(sys_version)
+
+    cursor.execute('''
+        SELECT day, SUM(crash_count)
+        FROM crash_daily WHERE %s
+        GROUP BY day ORDER BY day
+    ''' % ' AND '.join(where), params)
+    counts = {int(d): int(c) for d, c in cursor.fetchall()}
+    cursor.close()
+    conn.close()
+
+    days = []
+    for d in range(d_start, d_end + 1):
+        days.append({'date': time.strftime('%Y-%m-%d', time.gmtime(d * 86400)),
+                     'count': counts.get(d, 0)})
+    total = sum(x['count'] for x in days)
+    peak = max(days, key=lambda x: x['count']) if days else {'date': '', 'count': 0}
+    payload = {
+        'start': days[0]['date'] if days else start_s,
+        'end': days[-1]['date'] if days else end_s,
+        'total': total,
+        'avg': round(total / float(len(days)), 1) if days else 0,
+        'peak': peak,
+        'days': days,
+    }
+    cache_set(cache_key, payload)
+    return jsonify(payload)
+
+
 @app.route('/api/stats')
 def api_stats():
     total, unresolved, resolved, wontfix, top = global_stats()
@@ -551,7 +621,7 @@ def api_stack_trend(stack_pk):
     rows = cursor.fetchall()
     cursor.close()
     conn.close()
-    return jsonify([{'date': time.strftime('%Y-%m-%d', time.localtime(int(r[0]) * 86400)),
+    return jsonify([{'date': time.strftime('%Y-%m-%d', time.gmtime(int(r[0]) * 86400)),
                      'count': int(r[1])} for r in rows])
 
 

@@ -41,6 +41,17 @@ DDL = [
         versions TEXT,
         KEY idx_count (crash_count)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8''',
+    # 崩溃趋势页按天聚合：6.5 万行覆盖四年全部明细，任意筛选组合都只扫这张表
+    '''CREATE TABLE IF NOT EXISTS crash_daily (
+        day INT NOT NULL,
+        package_id INT NOT NULL,
+        version VARCHAR(64) NOT NULL DEFAULT '',
+        sys_version VARCHAR(32) NOT NULL DEFAULT '',
+        crash_count INT NOT NULL DEFAULT 0,
+        PRIMARY KEY (day, package_id, version, sys_version),
+        KEY idx_pkg (package_id, day),
+        KEY idx_sys (sys_version, day)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8''',
 ]
 
 # crash_info 上补的索引：(sys_version, ...) 让系统版本筛选走索引，
@@ -128,19 +139,38 @@ def rebuild(verbose=True):
         GROUP BY stack_key
     ''')
     stack_rows = cur.rowcount
+    # 按天聚合（趋势页用），直接从明细算，约 13s
+    cur.execute('DROP TABLE IF EXISTS crash_daily_new')
+    cur.execute('CREATE TABLE crash_daily_new LIKE crash_daily')
+    cur.execute('''
+        INSERT INTO crash_daily_new (day, package_id, version, sys_version, crash_count)
+        SELECT ci.crash_time DIV 86400,
+               ci.package_id,
+               COALESCE(pi.version, ''),
+               COALESCE(ci.sys_version, ''),
+               COUNT(*)
+        FROM crash_info ci
+        JOIN package_info pi ON pi.id = ci.package_id
+        WHERE ci.crash_time IS NOT NULL
+        GROUP BY ci.crash_time DIV 86400, ci.package_id,
+                 COALESCE(pi.version, ''), COALESCE(ci.sys_version, '')
+    ''')
+    daily_rows = cur.rowcount
     cur.execute('RENAME TABLE stack_pv_stat TO stack_pv_stat_old, '
                 'stack_pv_stat_new TO stack_pv_stat, '
-                'stack_stat TO stack_stat_old, stack_stat_new TO stack_stat')
+                'stack_stat TO stack_stat_old, stack_stat_new TO stack_stat, '
+                'crash_daily TO crash_daily_old, crash_daily_new TO crash_daily')
     cur.execute('DROP TABLE stack_pv_stat_old')
     cur.execute('DROP TABLE stack_stat_old')
+    cur.execute('DROP TABLE crash_daily_old')
     stamp = time.strftime('%Y-%m-%d %H:%M:%S')
     cur.execute('REPLACE INTO stat_meta (k, v) VALUES (%s, %s)', ('rebuilt_at', stamp))
     cur.execute('REPLACE INTO stat_meta (k, v) VALUES (%s, %s)', ('orphan_crashes', str(orphans)))
     cur.close()
     conn.close()
     if verbose:
-        print('汇总表重建完成：明细 %d 行 / 按栈 %d 行，耗时 %.1fs（%s）'
-              % (rows, stack_rows, time.time() - t0, stamp))
+        print('汇总表重建完成：明细 %d 行 / 按栈 %d 行 / 按天 %d 行，耗时 %.1fs（%s）'
+              % (rows, stack_rows, daily_rows, time.time() - t0, stamp))
     return rows
 
 
